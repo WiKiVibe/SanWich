@@ -1,0 +1,67 @@
+# Local secrets and machine-specific settings
+config.json
+.env
+*.env
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and runtime output
+build/
+dist/
+release/
+logs/
+*.log
+*.jsonl
+
+# Downloaded tools and AI/model artifacts
+tools/
+models/
+node_modules/
+.npm-cache/
+.hyperframes/
+rating-rule-cards/
+_diar_candidates/
+_語者分離_暫緩備份/
+_語者分離_暫緩備份/models/
+
+# Local media, samples, and temporary exports
+audio_SAMPLE.*
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.aac
+*.ogg
+*.mp4
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.bak*
+*.bak_*
+
+# Local diagnostic logs
+diag_log.txt
+install_log.txt
+gpu_detect_log.txt
+
+# Internal notes and design source files
+聲文去SanWich_工作計畫.md
+assets/source/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

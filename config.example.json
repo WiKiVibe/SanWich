@@ -1,0 +1,11 @@
+{
+  "api_provider": "deepseek",
+  "api_key": "",
+  "model": "deepseek-v4-flash",
+  "use_llm": false,
+  "use_text_fix": true,
+  "txt_diarization_enabled": false,
+  "diarization_num_speakers": 3,
+  "output_srt_enabled": true,
+  "output_txt_enabled": false
+}

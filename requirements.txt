@@ -1,0 +1,10 @@
+accelerate
+customtkinter
+huggingface_hub
+jieba
+numpy
+pillow
+safetensors
+sherpa-onnx
+tkinterdnd2
+transformers

@@ -140,8 +140,16 @@ API Key 申請步驟見 [`申請API_Key教學.md`](./申請API_Key教學.md)。
 
 ### 安裝
 
+一般使用者請到右側 **Releases** 下載 `SanWich_setup.zip`，完整解壓縮後執行：
+
 ```bat
- 01_setup.bat
+01_setup.bat
+```
+
+如果你是從 GitHub 原始碼頁面下載或 clone 專案，也可以在專案根目錄執行：
+
+```bat
+01_setup.bat
 ```
 
 腳本會建立 `.venv`、偵測 GPU 並安裝對應版本 PyTorch 與必要套件。
@@ -158,7 +166,7 @@ python -m venv .venv
 
 ### 開始使用
 
-1. 執行 `02_launch.bat`（或 `app\SanWich.py`）
+1. 安裝完成後執行 `02_launch.bat`
 2. 把音訊或影片拖進主視窗
 3. 勾選輸出格式（SRT / TXT），決定是否開啟 AI 校對
 4. 按開始，等辨識完成

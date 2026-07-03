@@ -138,8 +138,10 @@ SUCCESS = "#4ADE80"
 WARN = "#FBBF24"
 ERROR = "#F87171"
 RED_TEXT = "#B42318"
+WIKIVIBE_URL = "https://portaly.cc/WiKiVibe"
 GREEN_TEXT = "#027A48"
-# Inspired by SubDesk's AI subtitle review workflow:
+# Inspired by Breeze-ASR-25 and SubDesk's AI subtitle review workflow:
+# https://github.com/mtkresearch/Breeze-ASR-25
 # https://github.com/ji4/subdesk
 AI_REVIEW = "#D97706"
 AI_REVIEW_BG = "#3A2A17"
@@ -637,6 +639,89 @@ class InfoBubble(ctk.CTkLabel):
             self.tip = None
 
 
+class WikiVibeLink(ctk.CTkFrame):
+    def __init__(
+        self,
+        parent,
+        bubble_image=None,
+        qr_image=None,
+        text_color: str = TEXT_ON_DARK,
+    ):
+        super().__init__(parent, fg_color="transparent")
+        self.qr_image = qr_image
+        self.qr_popup = None
+
+        ctk.CTkLabel(
+            self,
+            text="By WiKiVibe",
+            text_color=text_color,
+            font=(EN_FONT, 12, "bold"),
+        ).pack(side="left")
+
+        self.link_widget = ctk.CTkLabel(
+            self,
+            image=bubble_image,
+            text="" if bubble_image is not None else "WiKiVibe",
+            width=28,
+            height=28,
+            fg_color="transparent",
+            cursor="hand2",
+            font=(FONT, 16),
+        )
+        self.link_widget.pack(side="left", padx=(6, 0))
+        self.link_widget.bind("<Button-1>", self.open_link)
+        self.link_widget.bind("<Enter>", self.show_qr)
+        self.link_widget.bind("<Leave>", self.hide_qr)
+        self.bind("<Destroy>", self.hide_qr, add="+")
+
+    def open_link(self, _event=None):
+        webbrowser.open_new_tab(WIKIVIBE_URL)
+
+    def show_qr(self, _event=None):
+        if self.qr_popup is not None:
+            return
+        self.qr_popup = tk.Toplevel(self)
+        self.qr_popup.overrideredirect(True)
+        self.qr_popup.attributes("-topmost", True)
+        self.qr_popup.configure(bg="#0C0D12")
+
+        box = ctk.CTkFrame(
+            self.qr_popup,
+            fg_color="#FFFFFF",
+            corner_radius=12,
+            border_width=1,
+            border_color="#E5E7EB",
+        )
+        box.pack(padx=1, pady=1)
+        label = ctk.CTkLabel(
+            box,
+            image=self.qr_image,
+            text="" if self.qr_image is not None else "WiKiVibe",
+            text_color=DARK,
+            fg_color="transparent",
+            font=(EN_FONT, 13, "bold"),
+        )
+        label.pack(padx=10, pady=10)
+
+        self.qr_popup.update_idletasks()
+        popup_w = self.qr_popup.winfo_width()
+        popup_h = self.qr_popup.winfo_height()
+        x = self.link_widget.winfo_rootx() + self.link_widget.winfo_width() - popup_w
+        y = self.link_widget.winfo_rooty() - popup_h - 8
+        if y < 0:
+            y = self.link_widget.winfo_rooty() + self.link_widget.winfo_height() + 8
+        x = max(8, min(x, self.winfo_screenwidth() - popup_w - 8))
+        self.qr_popup.geometry(f"+{x}+{y}")
+
+    def hide_qr(self, _event=None):
+        if self.qr_popup is not None:
+            try:
+                self.qr_popup.destroy()
+            except Exception:
+                pass
+            self.qr_popup = None
+
+
 class GradientBackdrop(tk.Canvas):
     def __init__(self, parent, top=GARNET, bottom=GARNET):
         super().__init__(parent, highlightthickness=0, bd=0, bg=top)
@@ -935,7 +1020,9 @@ class App(ctk.CTk):
                 pass
 
     def load_ui_assets(self):
-        self.setting_step_icon = self.load_tk_png("_setting.png", (35, 35), invert=True)
+        self.setting_step_icon = self.load_tk_png("_setting.png", (20, 20))
+        self.bubble_tea_icon = self.load_tk_png("_Bubble-tea.png", (24, 24))
+        self.wikivibe_qr_image = self.load_tk_png("_portaly_wikivibe.png", (190, 190))
         self.fallback_setting_text = "⚙"
 
     def load_tk_png(self, name: str, size: tuple[int, int], invert: bool = False):
@@ -1229,7 +1316,7 @@ class App(ctk.CTk):
         self.editor_switch.grid(row=2, column=0, sticky="w", pady=(24, 0))
         ctk.CTkLabel(
             card.body,
-            text="修正錯別字、簡體字、專有名詞、中國大陸用語",
+            text="修正錯別字、簡體字、簡中用語、專有名詞",
             text_color=MUTED_ON_DARK,
             font=(FONT, 13),
         ).grid(row=3, column=0, sticky="w", pady=(6, 0))
@@ -1416,11 +1503,11 @@ class App(ctk.CTk):
             text_color=MUTED_ON_DARK,
             font=(EN_FONT, 12, "bold"),
         ).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
+        WikiVibeLink(
             footer,
-            text="by WiKi ",
+            bubble_image=self.bubble_tea_icon,
+            qr_image=self.wikivibe_qr_image,
             text_color=MUTED_ON_DARK,
-            font=(EN_FONT, 12, "bold"),
         ).grid(row=0, column=1, sticky="e")
 
     def install_notes_placeholder(self):
@@ -1581,7 +1668,7 @@ class App(ctk.CTk):
         win.geometry("760x620")
         win.minsize(640, 520)
         win.configure(fg_color=BG)
-        self.apply_window_icon(win, "_setting.png", invert=True)
+        self.apply_window_icon(win, "_setting.png")
         win.transient(self)
         win.grab_set()
 
@@ -1761,17 +1848,17 @@ class App(ctk.CTk):
         credits.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             credits,
-            text="v2.1",
+            text="v2.1.1",
             text_color=TEXT_ON_DARK,
             font=(EN_FONT, 12, "bold"),
         ).grid(row=0, column=0, sticky="w")
         brand = ctk.CTkFrame(credits, fg_color="transparent")
         brand.grid(row=0, column=1, sticky="e")
-        ctk.CTkLabel(
+        WikiVibeLink(
             brand,
-            text="by WiKi",
+            bubble_image=self.bubble_tea_icon,
+            qr_image=self.wikivibe_qr_image,
             text_color=TEXT_ON_DARK,
-            font=(EN_FONT, 12, "bold"),
         ).pack(side="left")
 
     def log(self, msg: str, tag: str = ""):
@@ -4253,7 +4340,7 @@ class App(ctk.CTk):
         win.geometry("880x620")
         win.minsize(720, 480)
         win.configure(fg_color=BLACK_KITE)
-        self.apply_window_icon(win, "_setting.png", invert=True)
+        self.apply_window_icon(win, "_setting.png")
         win.transient(anchor)
         win.grab_set()
         win.grid_columnconfigure(0, weight=1)

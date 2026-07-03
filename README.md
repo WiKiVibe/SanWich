@@ -1,25 +1,150 @@
-# 聲文去SanWich
+<p align="center">
+  <img src="./assets/images/_LOGO.png" width="104" height="104" alt="SanWich Logo" />
+</p>
 
-聲文去SanWich 是一個 Windows 桌面語音轉文字工具，提供圖形介面、字幕輸出、文字修正與可選的 LLM 輔助整理流程。
+<h1 align="center">聲文去 SanWich — 台灣繁體中文語音轉文字工具</h1>
 
-## 功能
+<p align="center">
+  給台灣影片工作者、剪輯師、記者、內容創作者的 Windows 桌面工具：<br>
+  丟進音訊或影片，本機 Breeze-ASR-25 辨識，AI 總編輯校對，直接產出接近可交付的 SRT 字幕。
+</p>
 
-- 語音轉文字工作流程
-- SRT / TXT 輸出
-- CustomTkinter 桌面介面
-- 可選 API 文字修正
-- 可選 TXT 語者分離
-- 可選模型與 FFmpeg 下載流程
+<p align="center">
+  <strong>台灣繁體中文語音轉文字</strong>｜<strong>SRT 字幕產生器</strong>｜<strong>Breeze-ASR-25 GUI</strong>｜<strong>AI 字幕校對</strong>｜<strong>訪談逐字稿</strong>
+</p>
 
-## 快速開始
+---
 
-建議在 Windows 上使用安裝腳本：
+## 🎯 一句話說明
 
-```bat
-聲文去SanWich_setup.bat
+SanWich 不是雲端訂閱服務，也不是會議記錄平台。
+
+它只做一件事：**把你的音訊或影片，在你自己的電腦上轉成第一次辨識就盡量接近可交付的繁體中文逐字稿與 SRT 字幕。** 辨識在本機完成，AI 校對可開可關，改完直接在內建編輯器精修。
+
+適合這些場景：
+
+| 場景 | 你丟進來的 | SanWich 給你的 |
+| --- | --- | --- |
+| 🎬 影片剪輯 | 訪談毛片音軌 | 可直接匯入剪輯軟體的 SRT 字幕 |
+| 🎙️ 訪談整理 | 一兩小時的訪談錄音 | 逐字稿 TXT（可選語者標註） |
+| 📰 新聞採訪 | 記者會、電訪錄音 | 校對過的引述文字 |
+| 📚 教學內容 | 課程、講座錄影 | 字幕＋逐字稿雙輸出 |
+
+---
+
+## 🧭 它怎麼工作
+
+```mermaid
+flowchart LR
+  A["🎬 拖入音訊 / 影片"] --> B["🖥️ 本機 Breeze-ASR-25 辨識"]
+  B --> C{"AI 校對開啟？"}
+  C -->|是| D["✨ LLM 總編輯校對"]
+  C -->|否| E["📄 直接輸出"]
+  D --> E
+  E --> F["📝 SRT / TXT"]
+  F --> G["✂️ 內建 SRT 編輯器精修"]
+  G --> H["✅ 匯入剪輯軟體"]
 ```
 
-腳本會建立 `.venv`、安裝必要套件，並依照電腦環境安裝 PyTorch。
+語音辨識全程在你的電腦上跑（支援 GPU 加速，無 GPU 自動用 CPU）。只有在你開啟 AI 校對時，才會把「辨識後的文字」送到你選擇的 LLM 供應商。
+
+---
+
+## ✨ 核心能力
+
+| 圖示 | 能力 | 解決的問題 |
+| --- | --- | --- |
+| 🖥️ | 本機語音辨識 | Breeze-ASR-25 專為台灣中文優化，音檔不離開你的電腦 |
+| ✨ | AI 總編輯校對 | 套用「總編輯 Prompt」修同音錯字、贅字，SRT 結構鎖死不亂動 |
+| ✂️ | SRT 字幕編輯器 | 波形時間軸、拖拉調整、切割合併、尋找取代，不用再開別的軟體 |
+| 🔁 | 快速對照 | 逐段播放、核對 AI 改了什麼，一鍵接受或還原 |
+| 🧠 | 個人化規則庫 | 從你的手動修改自動學規則，越用越懂你的用字習慣 |
+| 🗣️ | 語者分離 | TXT 逐字稿可標註語者（指定 2–6 人） |
+| 📦 | 批次處理 | 多個檔案排隊自動跑完 |
+| 🀄 | 全中文錯誤訊息 | API 錯誤（額度、限流、金鑰失效）全部翻成人話 |
+
+---
+
+## ✂️ 內建 SRT 編輯器
+
+辨識完不用換軟體，直接精修：
+
+- **波形時間軸**：看著波形拖拉字幕塊 IN/OUT 點，playhead 跟隨播放
+- **切割 / 合併 / 刪除**：剪刀切割自動重排序號、多選合併、Delete 刪除
+- **尋找取代**：Ctrl+F / Ctrl+H，統一修正重複錯字
+- **狀態標色**：AI 修改過的字幕標橘色、時間軸異常標紅色，一眼看出要檢查哪裡
+- **快捷操作**：Ctrl+滾輪縮放時間軸、上下鍵跳字幕 IN/OUT、Undo 反悔
+- **匯入外部 SRT**：別處產生的字幕也能拉進來修
+
+## 🔁 快速對照：懶人核對 AI 修改
+
+AI 改過的每一段，逐段播放原音檔片段給你聽：
+
+```mermaid
+flowchart LR
+  A["▶️ 播放片段"] --> B{"AI 改得對嗎？"}
+  B -->|對| C["✅ 接受並下一個"]
+  B -->|不對| D["↩️ 還原並下一個"]
+  B -->|再想想| E["⏭️ 略過"]
+  B -->|快好了| F["✏️ 直接微調文字"]
+```
+
+不用整份重聽，只核對有被改動的地方。
+
+## 🧠 個人化規則庫：越用越懂你
+
+你在編輯器裡的每次手動修正，SanWich 會自動整理成「before → after」規則候選：
+
+- 匯出時彈出建議清單，勾選要收進規則庫的（可分領域：通用 / 訪談 / 新聞 / 科技 / 教學）
+- 下次 AI 校對時自動把你的規則注入 Prompt，同樣的錯不用改第二次
+- 自動追蹤採納率，久未使用的規則自動冷凍、相似規則自動合併，規則庫不會無限膨脹
+- 規則存在本機 `core/personal_rules.json`，不會上傳
+
+---
+
+## 🔐 資料與隱私
+
+```mermaid
+flowchart TB
+  A["🎬 你的音訊 / 影片"] --> B["🖥️ 本機 Breeze-ASR-25"]
+  B --> C["📝 辨識文字"]
+  C -->|AI 校對開啟時| D["☁️ 你設定的 LLM 供應商"]
+  C -->|AI 校對關閉時| E["📄 直接輸出"]
+  D --> E
+  E --> F["💾 SRT / TXT 存本機"]
+```
+
+| 資料 | 去向 |
+| --- | --- |
+| 🎬 音訊 / 影片 | **不上傳**，辨識全程在本機 |
+| 📝 辨識後文字 | 只有開啟 AI 校對時，送往你設定的 LLM 供應商 |
+| 🧠 個人化規則庫 | 本機 |
+| 🕘 編輯歷史 | 本機 |
+| 🔑 API Key | 本機 `config.json`（已被 `.gitignore` 排除，請勿上傳） |
+
+---
+
+## ⚙️ 推薦配置
+
+| 項目 | 建議 | 說明 |
+| --- | --- | --- |
+| 🖥️ GPU | NVIDIA 顯卡 | 安裝腳本自動偵測並安裝對應 CUDA 版 PyTorch；無 GPU 自動退回 CPU（速度較慢） |
+| ✨ LLM | Gemini / DeepSeek | 設定視窗選供應商填 API Key 即可，皆有免費額度可先試 |
+| 💾 硬碟 | 預留約 4 GB | 首次執行會下載 Breeze-ASR-25 模型（約 3–4 GB） |
+
+API Key 申請步驟見 [`申請API_Key教學.md`](./申請API_Key教學.md)。
+
+---
+
+## 🚀 安裝與使用
+
+### 安裝
+
+```bat
+ 01_setup.bat
+```
+
+腳本會建立 `.venv`、偵測 GPU 並安裝對應版本 PyTorch 與必要套件。
 
 也可以手動安裝：
 
@@ -28,51 +153,47 @@ python -m venv .venv
 .venv\Scripts\python -m pip install --upgrade pip setuptools wheel
 .venv\Scripts\python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 .venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python 聲文去SanWich.py
 ```
 
-## 設定 API Key
 
-請先複製範例設定檔：
+### 開始使用
 
-```bat
-copy config.example.json config.json
-```
+1. 執行 `02_launch.bat`（或 `app\SanWich.py`）
+2. 把音訊或影片拖進主視窗
+3. 勾選輸出格式（SRT / TXT），決定是否開啟 AI 校對
+4. 按開始，等辨識完成
+5. 用內建編輯器精修，匯出
 
-然後把自己的 API Key 填進 `config.json`。`config.json` 已經被 `.gitignore` 排除，不應該上傳到 GitHub。
+---
 
-## 不上傳到 GitHub 的檔案
+## 🧱 產品邊界
 
-以下內容會在本機產生或下載，不適合放進 Git：
+SanWich 刻意不做這些事情：
 
-- `.venv/`
-- `logs/`
-- `release/`
-- `tools/`
-- `_diar_candidates/`
-- `_語者分離_暫緩備份/models/`
-- 音訊檔、快取檔、打包成品
+| 不做 | 原因 |
+| --- | --- |
+| ❌ 雲端辨識 | 主線是本機 ASR，音檔不離開你的電腦 |
+| ❌ 多語言 | 先把台灣繁體中文做到最好 |
+| ❌ 會議記錄平台 | 專注轉檔工作流，不做摘要、待辦、協作 |
+| ❌ 內容擴寫 | 總編輯 Prompt 鎖死 SRT 結構，只修錯不編造你沒說的話 |
+| ❌ 即時聽打 | 定位是檔案轉逐字稿，不是即時輸入工具 |
 
-## 上傳到 GitHub
+---
 
-建議先建立 Private repo。GitHub 沒有「知道連結的人可看」的 repo 模式；Private repo 只有你邀請的人能看，確認安全後再改成 Public。
+## 🙏 致謝 / Inspired By
 
-第一次建立 GitHub repo 後，可以使用：
+- [mtkresearch/Breeze-ASR-25](https://github.com/mtkresearch/Breeze-ASR-25) — 聯發科創新基地的台灣中文語音辨識模型（Apache 2.0），本專案的辨識主力。
+- [ji4/subdesk](https://github.com/ji4/subdesk) — 快速對照、AI 校對結果核對流程與字幕修改標示的設計靈感來源。
 
-```bat
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_NAME/YOUR_REPO.git
-git push -u origin main
-```
+---
 
-如果已經有遠端 repo，只需要把 `YOUR_NAME/YOUR_REPO` 換成你的 GitHub 帳號與 repo 名稱。
+## ⭐ Star
 
-## 安全提醒
+如果這個工具幫你省下了修字幕的時間，歡迎點個 Star 支持繼續開發。
 
-- 不要上傳 `config.json`，裡面會有你的 API Key。
-- 不要上傳 `.venv/`、模型、音訊、logs、release zip。
-- 如果曾經把 API Key 貼到聊天、文件或公開 repo，請到 API 平台重新產生 Key，並停用舊 Key。
-- Private repo 仍建議當成「未來可能公開」來整理，避免秘密資訊進入 Git 歷史。
+●●●歡迎請喝飲料●●●
+https://portaly.cc/WiKiVibe
+
+---
+## 回饋與問題回報
+如果遇到錯誤、安裝失敗，或想建議功能，請到 GitHub Issues 留言

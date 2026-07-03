@@ -58,13 +58,16 @@ $LogoIco = Join-Path $Root "assets\images\_LOGO.ico"
 $LogoPng = Join-Path $Root "assets\images\_LOGO.png"
 $SettingPng = Join-Path $Root "assets\images\_setting.png"
 $SettingIco = Join-Path $Root "assets\images\_setting.ico"
+$BubbleTeaPng = Join-Path $Root "assets\images\_Bubble-tea.png"
+$WikiVibeQrPng = Join-Path $Root "assets\images\_portaly_wikivibe.png"
+$PythonInstaller = Join-Path $Root "tools\python-3.12.9-amd64.exe"
 
 foreach ($item in @($MainPy, $CorePy, $SetupBat)) {
     if ($null -eq $item) {
         throw "Missing required source files for the main package."
     }
 }
-foreach ($path in @($LogoIco, $LogoPng, $SettingPng, $SettingIco)) {
+foreach ($path in @($LogoIco, $LogoPng, $SettingPng, $SettingIco, $BubbleTeaPng, $WikiVibeQrPng)) {
     if (!(Test-Path -LiteralPath $path)) {
         throw "Missing required file: $path"
     }
@@ -90,17 +93,31 @@ $AppAssets = Join-Path $AppDir "assets"
 $AppCore = Join-Path $AppDir "core"
 New-Item -ItemType Directory -Force -Path $Stage, $AppDir, $AppAssets, $AppCore | Out-Null
 
-Copy-IfExists $MainPy.FullName (Join-Path $AppDir $MainPy.Name)
-Copy-IfExists $CorePy.FullName (Join-Path $AppCore "SanWich_legacy_core.py")
+Copy-IfExists $MainPy.FullName (Join-Path $AppDir "SanWich.py")
+Copy-IfExists (Join-Path $Root "core\SanWich_legacy_core.py") (Join-Path $AppCore "SanWich_legacy_core.py")
+Copy-IfExists (Join-Path $Root "core\diarization.py") (Join-Path $AppCore "diarization.py")
+Copy-IfExists (Join-Path $Root "core\personal_rules.py") (Join-Path $AppCore "personal_rules.py")
 Copy-IfExists $SetupBat.FullName (Join-Path $AppDir "setup_internal.bat")
+Copy-IfExists (Join-Path $Root "requirements.txt") (Join-Path $AppDir "requirements.txt")
+Copy-IfExists (Join-Path $Root "download_diar_models.bat") (Join-Path $AppDir "download_diar_models.bat")
 if (Test-Path -LiteralPath $ApiDoc) {
     Copy-IfExists $ApiDoc.FullName (Join-Path $AppDir $ApiDoc.Name)
+}
+if (Test-Path -LiteralPath $PythonInstaller) {
+    Copy-IfExists $PythonInstaller (Join-Path $AppDir "tools\python-3.12.9-amd64.exe")
+    Write-Host "Bundled Python installer: included"
+    "Bundled Python installer: included" | Add-Content -Encoding UTF8 $Log
+} else {
+    Write-Host "Bundled Python installer: missing (setup will download Python if needed)"
+    "Bundled Python installer: missing" | Add-Content -Encoding UTF8 $Log
 }
 
 Copy-IfExists $LogoIco (Join-Path $AppAssets "images\_LOGO.ico")
 Copy-IfExists $LogoPng (Join-Path $AppAssets "images\_LOGO.png")
 Copy-IfExists $SettingPng (Join-Path $AppAssets "images\_setting.png")
 Copy-IfExists $SettingIco (Join-Path $AppAssets "images\_setting.ico")
+Copy-IfExists $BubbleTeaPng (Join-Path $AppAssets "images\_Bubble-tea.png")
+Copy-IfExists $WikiVibeQrPng (Join-Path $AppAssets "images\_portaly_wikivibe.png")
 
 Copy-IfExists (Join-Path $Root "assets\fonts\Noto_Sans_TC\NotoSansTC-VariableFont_wght.ttf") (Join-Path $AppAssets "fonts\Noto_Sans_TC\NotoSansTC-VariableFont_wght.ttf")
 Copy-IfExists (Join-Path $Root "assets\fonts\Noto_Sans_TC\README.txt") (Join-Path $AppAssets "fonts\Noto_Sans_TC\README.txt")
@@ -126,10 +143,14 @@ $InternalRunText = @(
     '  pause',
     '  exit /b 1',
     ')',
+    'set "APP_PY=SanWich.py"',
+    'if exist "%APP_PY%" goto found_app',
     'set "APP_PY="',
-    'for %%F in ("%~dp0*SanWich*.py") do (',
-    '  set "APP_PY=%%~fF"',
-    '  goto found_app',
+    'for %%F in ("*SanWich*.py") do (',
+    '  if exist "%%~fF" (',
+    '    set "APP_PY=%%~fF"',
+    '    goto found_app',
+    '  )',
     ')',
     ':found_app',
     'if not defined APP_PY (',
@@ -149,6 +170,47 @@ $InternalRunText = @(
     'exit /b 0'
 ) -join "`r`n"
 Set-Content -Encoding ASCII (Join-Path $AppDir "run_app.bat") -Value $InternalRunText
+
+$ShortcutScriptText = @'
+$ErrorActionPreference = "Stop"
+
+$AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PackageDir = Split-Path -Parent $AppDir
+$Target = Join-Path $AppDir "run_app.bat"
+$Icon = Join-Path $AppDir "assets\images\_LOGO.ico"
+
+if (!(Test-Path -LiteralPath $Target)) {
+    throw "Shortcut target not found: $Target"
+}
+
+$Shell = New-Object -ComObject WScript.Shell
+
+function New-SanWichShortcut {
+    param([string] $Path)
+
+    $Shortcut = $Shell.CreateShortcut($Path)
+    $Shortcut.TargetPath = $Target
+    $Shortcut.WorkingDirectory = $AppDir
+    $Shortcut.Description = "SanWich"
+    if (Test-Path -LiteralPath $Icon) {
+        $Shortcut.IconLocation = $Icon
+    }
+    $Shortcut.Save()
+}
+
+$Desktop = [Environment]::GetFolderPath("DesktopDirectory")
+if ([string]::IsNullOrWhiteSpace($Desktop) -or !(Test-Path -LiteralPath $Desktop)) {
+    $Desktop = $Shell.SpecialFolders.Item("Desktop")
+}
+
+New-SanWichShortcut (Join-Path $PackageDir "SanWich.lnk")
+New-SanWichShortcut (Join-Path $Desktop "SanWich.lnk")
+
+Write-Host "Shortcuts created:"
+Write-Host "  $PackageDir\SanWich.lnk"
+Write-Host "  $Desktop\SanWich.lnk"
+'@
+Set-Content -Encoding ASCII (Join-Path $AppDir "create_shortcuts.ps1") -Value $ShortcutScriptText
 
 $InstallText = @(
     '@echo off',
@@ -172,35 +234,33 @@ $LaunchText = @(
 ) -join "`r`n"
 Set-Content -Encoding ASCII (Join-Path $Stage "02_launch.bat") -Value $LaunchText
 
-$ReadmeText = @(
-    'SanWich main light package',
-    '',
-    'Please follow this order:',
-    '1. Run 01_setup.bat',
-    '2. When setup is done, run 02_launch.bat',
-    '',
-    'Notes:',
-    '- This package does not include your API key, personal config, model cache, or temp files.',
-    '- Python, FFmpeg, and runtime dependencies will be downloaded during setup.',
-    '- Breeze-ASR-25 will download on the first real transcription, about 3-4 GB.',
-    '- Put your own API key in the settings page if you want AI proofreading.',
-    '- The app folder contains internal files and normally does not need to be opened.'
-) -join "`r`n"
-Set-Content -Encoding UTF8 (Join-Path $Stage "README.txt") -Value $ReadmeText
+$ReadmeBase64 = "6IGy5paH5Y67U2FuV2ljaCDlronoo53ljIUNClNhbldpY2ggaW5zdGFsbGVyIHBhY2thZ2UNCg0K6KuL5YWI6Kej5aOT57iu5pW05YCL6LOH5paZ5aS+77yM5YaN5Z+36KGMIDAxX3NldHVwLmJhdOOAgg0KRXh0cmFjdCB0aGUgd2hvbGUgZm9sZGVyIGZpcnN0LCB0aGVuIHJ1biAwMV9zZXR1cC5iYXQuDQoNCuWuieijneWujOaIkOW+jO+8jOiri+W+nuahjOmdouaNt+W+keaIluacrOizh+aWmeWkvuWFp+eahCBTYW5XaWNoLmxuayDplovllZ/nqIvlvI/jgIINCkFmdGVyIHNldHVwIGZpbmlzaGVzLCBvcGVuIFNhbldpY2ggZnJvbSB0aGUgZGVza3RvcCBzaG9ydGN1dCBvciBTYW5XaWNoLmxuayBpbiB0aGlzIGZvbGRlci4NCg0KMDJfbGF1bmNoLmJhdCDku43kv53nlZnngrrlgpnnlKjllZ/li5XlmajjgIINCjAyX2xhdW5jaC5iYXQgaXMgc3RpbGwgaW5jbHVkZWQgYXMgYSBmYWxsYmFjayBsYXVuY2hlci4NCg0K6YCZ5YCL5a6J6KOd5YyF5LiN5YyF5ZCr5L2g55qEIEFQSSBLZXnjgIHlgIvkurroqK3lrprjgIHmqKHlnovlv6vlj5bmiJbmmqvlrZjmqpTjgIINClRoaXMgcGFja2FnZSBkb2VzIG5vdCBpbmNsdWRlIHlvdXIgQVBJIGtleSwgcGVyc29uYWwgY29uZmlnLCBtb2RlbCBjYWNoZSwgb3IgdGVtcCBmaWxlcy4NCg0K5aaC5p6c6Zu76IWm5rKS5pyJIFB5dGhvbu+8jOWuieijneeoi+W8j+acg+WEquWFiOS9v+eUqCBhcHBcdG9vbHNccHl0aG9uLTMuMTIuOS1hbWQ2NC5leGXjgIINCklmIFB5dGhvbiBpcyBub3QgaW5zdGFsbGVkLCBzZXR1cCBmaXJzdCB1c2VzIGFwcFx0b29sc1xweXRob24tMy4xMi45LWFtZDY0LmV4ZS4NCg0K5aaC5p6c5YyF5YWn5rKS5pyJIFB5dGhvbiDlronoo53mqpTvvIzlronoo53nqIvlvI/mnIPlvp4gcHl0aG9uLm9yZyDkuIvovInjgIINCklmIHRoZSBidW5kbGVkIFB5dGhvbiBpbnN0YWxsZXIgaXMgbWlzc2luZywgc2V0dXAgZG93bmxvYWRzIFB5dGhvbiBmcm9tIHB5dGhvbi5vcmcuDQoNCkZGbXBlZyDoiIfln7fooYzmiYDpnIDlpZfku7bmnIPlnKjlronoo53mmYLkvp3pnIDopoHkuIvovInjgIINCkZGbXBlZyBhbmQgcnVudGltZSBkZXBlbmRlbmNpZXMgd2lsbCBiZSBkb3dubG9hZGVkIGR1cmluZyBzZXR1cCB3aGVuIG5lZWRlZC4NCg0K56ys5LiA5qyh55yf5q2j6L2J5a+r5pmC5pyD5LiL6LyJIEJyZWV6ZS1BU1ItMjUg5qih5Z6L77yM57SEIDMtNCBHQuOAgg0KQnJlZXplLUFTUi0yNSB3aWxsIGRvd25sb2FkIG9uIHRoZSBmaXJzdCByZWFsIHRyYW5zY3JpcHRpb24sIGFib3V0IDMtNCBHQi4NCg0K5aaC5p6c6KaB5L2/55SoIEFJIOagoeWwje+8jOiri+WcqOioreWumumggeWhq+WFpeS9oOiHquW3seeahCBBUEkgS2V544CCDQpQdXQgeW91ciBvd24gQVBJIGtleSBpbiB0aGUgc2V0dGluZ3MgcGFnZSBpZiB5b3Ugd2FudCBBSSBwcm9vZnJlYWRpbmcuDQoNCmFwcCDos4fmlpnlpL7mmK/lhafpg6jmqpTmoYjvvIzkuIDoiKzkuI3pnIDopoHmiZPplovjgIINClRoZSBhcHAgZm9sZGVyIGNvbnRhaW5zIGludGVybmFsIGZpbGVzIGFuZCBub3JtYWxseSBkb2VzIG5vdCBuZWVkIHRvIGJlIG9wZW5lZC4="
+[System.IO.File]::WriteAllText(
+    (Join-Path $Stage "README.txt"),
+    [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ReadmeBase64)),
+    [System.Text.UTF8Encoding]::new($true)
+)
 
 $Zip = Join-Path $Release "SanWich_setup.zip"
 if (Test-Path -LiteralPath $Zip) {
-    Remove-Item -LiteralPath $Zip -Force
+    $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $Zip = Join-Path $Release "SanWich_setup_$Stamp.zip"
+    "Existing SanWich_setup.zip found; writing $Zip instead." | Add-Content -Encoding UTF8 $Log
 }
 Compress-Archive -Path $Stage -DestinationPath $Zip
 
 $Summary = [pscustomobject]@{
     ZipPath = $Zip
     ZipSizeMB = [math]::Round((Get-Item -LiteralPath $Zip).Length / 1MB, 2)
+    BundledPythonInstaller = (Test-Path -LiteralPath $PythonInstaller)
 }
 $Summary | Format-List | Out-String | Add-Content -Encoding UTF8 $Log
 
-Remove-Item -LiteralPath $StageRoot -Recurse -Force
+try {
+    Remove-Item -LiteralPath $StageRoot -Recurse -Force
+} catch {
+    "Warning: could not remove staging folder $StageRoot ($($_.Exception.Message))" | Add-Content -Encoding UTF8 $Log
+}
 
 Write-Host ""
 Write-Host "============================================================"

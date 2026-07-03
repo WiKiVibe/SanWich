@@ -17,6 +17,7 @@ datas = [
     ('assets/images/_setting.ico','assets/images'),
     ('assets/images/_setting.png','assets/images'),
     ('assets/images/_Bubble-tea.png','assets/images'),
+    ('assets/images/_portaly_wikivibe.png','assets/images'),
     ('assets/fonts/Noto_Sans_TC/NotoSansTC-VariableFont_wght.ttf', 'assets/fonts/Noto_Sans_TC'),
     ('assets/fonts/Noto_Sans_TC/README.txt', 'assets/fonts/Noto_Sans_TC'),
     ('assets/fonts/Noto_Sans_TC/OFL.txt',    'assets/fonts/Noto_Sans_TC'),

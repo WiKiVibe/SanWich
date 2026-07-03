@@ -2,6 +2,7 @@
 config.json
 .env
 *.env
+.codex_ssh/
 
 # Python environments and caches
 .venv/
@@ -58,10 +59,13 @@ gpu_detect_log.txt
 
 # Internal notes and design source files
 聲文去SanWich_工作計畫.md
+安裝包製作_踩雷與解法.md
+CLEANUP_BACKUPS.bat
 assets/source/
 
 # OS and editor files
 .DS_Store
 Thumbs.db
+image.png
 .vscode/
 .idea/

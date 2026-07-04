@@ -42,12 +42,10 @@ echo Upgrading pip ...
 "%PY%" -m pip install --upgrade pip setuptools wheel
 if errorlevel 1 ( echo [ERROR] pip upgrade failed & pause & exit /b 1 )
 
-REM ---- PyTorch: CUDA if an NVIDIA GPU is present, else CPU ----
-set "TORCH_INDEX=https://download.pytorch.org/whl/cpu"
-nvidia-smi >nul 2>&1 && set "TORCH_INDEX=https://download.pytorch.org/whl/cu121"
+REM ---- PyTorch: detection + install + verify via setup_torch.py ----
 echo.
-echo Installing PyTorch from !TORCH_INDEX! (this is the big one, please wait) ...
-"%PY%" -m pip install torch torchaudio --index-url !TORCH_INDEX!
+echo Installing PyTorch via setup_torch.py (the big one, please wait) ...
+"%PY%" setup_torch.py
 if errorlevel 1 ( echo [ERROR] torch install failed & pause & exit /b 1 )
 
 echo.

@@ -1,7 +1,7 @@
 {
-  "api_provider": "deepseek",
+  "api_provider": "gemini",
   "api_key": "",
-  "model": "deepseek-v4-flash",
+  "model": "gemini-2.5-flash",
   "use_llm": false,
   "use_text_fix": true,
   "txt_diarization_enabled": false,

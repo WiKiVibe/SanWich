@@ -42,11 +42,9 @@ echo Upgrading pip ...
 "%PY%" -m pip install --upgrade pip setuptools wheel
 if errorlevel 1 ( echo [ERROR] pip upgrade failed & echo pip-fail >> "%LOG%" & pause & exit /b 1 )
 
-set "TORCH=https://download.pytorch.org/whl/cpu"
-nvidia-smi >nul 2>&1 && set "TORCH=https://download.pytorch.org/whl/cu121"
 echo.
-echo Installing PyTorch from !TORCH!  (this is large, may take 10+ min) ...
-"%PY%" -m pip install torch torchaudio --index-url !TORCH!
+echo Installing PyTorch via setup_torch.py (large, may take 10+ min) ...
+"%PY%" setup_torch.py
 if errorlevel 1 ( echo [ERROR] torch install failed & echo torch-fail >> "%LOG%" & pause & exit /b 1 )
 
 echo.

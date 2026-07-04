@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Force -Path $Release, $LogDir | Out-Null
 $Log = Join-Path $LogDir "build_main_zip.log"
 
 "============================================================" | Set-Content -Encoding UTF8 $Log
-"聲文去SanWich light package" | Add-Content -Encoding UTF8 $Log
+"SanWich light package" | Add-Content -Encoding UTF8 $Log
 "Started at $(Get-Date)" | Add-Content -Encoding UTF8 $Log
 "Folder: $Root" | Add-Content -Encoding UTF8 $Log
 "============================================================" | Add-Content -Encoding UTF8 $Log
@@ -62,6 +62,8 @@ $BubbleTeaPng = Join-Path $Root "assets\images\_Bubble-tea.png"
 $WikiVibeQrPng = Join-Path $Root "assets\images\_portaly_wikivibe.png"
 $PythonInstaller = Join-Path $Root "tools\python-3.12.9-amd64.exe"
 
+$SetupTorch = Join-Path $Root "setup_torch.py"
+if (!(Test-Path -LiteralPath $SetupTorch)) { throw "Missing required file: setup_torch.py" }
 foreach ($item in @($MainPy, $CorePy, $SetupBat)) {
     if ($null -eq $item) {
         throw "Missing required source files for the main package."
@@ -99,6 +101,9 @@ Copy-IfExists (Join-Path $Root "core\diarization.py") (Join-Path $AppCore "diari
 Copy-IfExists (Join-Path $Root "core\personal_rules.py") (Join-Path $AppCore "personal_rules.py")
 Copy-IfExists $SetupBat.FullName (Join-Path $AppDir "setup_internal.bat")
 Copy-IfExists (Join-Path $Root "requirements.txt") (Join-Path $AppDir "requirements.txt")
+Copy-IfExists $SetupTorch (Join-Path $AppDir "setup_torch.py")
+Copy-IfExists (Join-Path $Root "core\models\diarization\seg-pyannote-segmentation-3.onnx") (Join-Path $AppCore "models\diarization\seg-pyannote-segmentation-3.onnx")
+Copy-IfExists (Join-Path $Root "core\models\diarization\3dspeaker_eres2net_base_zh.onnx") (Join-Path $AppCore "models\diarization\3dspeaker_eres2net_base_zh.onnx")
 Copy-IfExists (Join-Path $Root "download_diar_models.bat") (Join-Path $AppDir "download_diar_models.bat")
 if (Test-Path -LiteralPath $ApiDoc) {
     Copy-IfExists $ApiDoc.FullName (Join-Path $AppDir $ApiDoc.Name)

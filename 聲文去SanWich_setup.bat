@@ -212,67 +212,18 @@ REM ------------------------------------------------------------
 echo.
 echo [4/5] Installing PyTorch...
 
-set "TORCH_INDEX=https://download.pytorch.org/whl/cpu"
-set "TORCH_LABEL=CPU"
-set "HAS_NVIDIA=0"
-set "GPU_NAME="
-set "COMPUTE_CAP="
-set "CC_MAJOR="
-
-for /f "delims=" %%G in ('nvidia-smi --query-gpu^=name --format^=csv,noheader 2^>nul') do (
-    if not defined GPU_NAME set "GPU_NAME=%%G"
-    set "HAS_NVIDIA=1"
+REM GPU detection, CUDA build selection, cache purge, install and verify
+REM all happen inside setup_torch.py (Python). Do NOT parse compute_cap or
+REM pass index URLs through cmd - it mangles them (Playbook section 3).
+if not exist "setup_torch.py" (
+    echo     [ERROR] setup_torch.py is missing next to this script.
+    goto :END_FAIL
 )
-
-if "!HAS_NVIDIA!"=="0" (
-    echo     No NVIDIA GPU detected. Installing CPU PyTorch.
-    goto :DO_TORCH_INSTALL
-)
-
-echo     NVIDIA GPU detected: !GPU_NAME!
-
-for /f "delims=" %%C in ('nvidia-smi --query-gpu^=compute_cap --format^=csv,noheader 2^>nul') do (
-    if not defined COMPUTE_CAP set "COMPUTE_CAP=%%C"
-)
-
-if not defined COMPUTE_CAP goto :GPU_NAME_FALLBACK
-
-for /f "tokens=1 delims=." %%M in ("!COMPUTE_CAP!") do set "CC_MAJOR=%%M"
-echo !CC_MAJOR! | findstr /r "^[0-9][0-9]*$" > nul
-if errorlevel 1 goto :GPU_NAME_FALLBACK
-
-echo     Compute capability: !COMPUTE_CAP!
-if !CC_MAJOR! GEQ 12 (
-    set "TORCH_INDEX=https://download.pytorch.org/whl/cu128"
-    set "TORCH_LABEL=CUDA 12.8"
-) else (
-    set "TORCH_INDEX=https://download.pytorch.org/whl/cu121"
-    set "TORCH_LABEL=CUDA 12.1"
-)
-goto :DO_TORCH_INSTALL
-
-:GPU_NAME_FALLBACK
-echo     Compute capability was not available.
-echo     Falling back to GPU name detection.
-echo !GPU_NAME! | findstr /i /c:"RTX 50" > nul
-if not errorlevel 1 (
-    set "TORCH_INDEX=https://download.pytorch.org/whl/cu128"
-    set "TORCH_LABEL=CUDA 12.8"
-) else (
-    set "TORCH_INDEX=https://download.pytorch.org/whl/cu121"
-    set "TORCH_LABEL=CUDA 12.1"
-)
-
-:DO_TORCH_INSTALL
-echo     PyTorch target: !TORCH_LABEL!
-echo     Index URL: !TORCH_INDEX!
 echo     This download is large and may take several minutes.
-echo [TORCH !TORCH_LABEL!] >> "%LOG%"
-
-"%PY%" -m pip uninstall torch torchaudio torchvision -y >> "%LOG%" 2>&1
-"%PY%" -m pip install --no-cache-dir torch torchaudio --index-url !TORCH_INDEX! >> "%LOG%" 2>&1
+echo [TORCH via setup_torch.py] >> "%LOG%"
+"%PY%" setup_torch.py
 if errorlevel 1 (
-    echo     [ERROR] PyTorch install failed. See %LOG%
+    echo     [ERROR] PyTorch install failed. See gpu_detect_log.txt
     goto :END_FAIL
 )
 

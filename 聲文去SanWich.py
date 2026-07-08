@@ -271,6 +271,73 @@ def load_diarization() -> types.ModuleType | None:
 
 DIARIZATION = load_diarization()
 
+
+def load_license_manager() -> types.ModuleType | None:
+    """載入 core/license_manager.py。失敗回 None，Free 功能不受任何影響。"""
+    path = here() / "core" / "license_manager.py"
+    if not path.exists():
+        return None
+    try:
+        source = path.read_text(encoding="utf-8")
+        module = types.ModuleType("SanWich_license_manager")
+        module.__file__ = str(path)
+        module.__name__ = "SanWich_license_manager"
+        sys.modules[module.__name__] = module
+        exec(compile(source, str(path), "exec"), module.__dict__)
+        return module
+    except Exception:
+        return None
+
+
+LICENSE_MODULE = load_license_manager()
+
+
+def _create_license_manager():
+    if LICENSE_MODULE is None:
+        return None
+    try:
+        return LICENSE_MODULE.LicenseManager()
+    except Exception:
+        return None
+
+
+LICENSE_MANAGER = _create_license_manager()
+
+# 授權模組不可用時的備援：Free 功能一律照常，Supporter 功能保守關閉。
+_FALLBACK_FREE_FEATURES = {
+    "single_transcription", "export_srt", "export_txt",
+    "basic_ai_proofread", "basic_srt_editor", "find_replace",
+    "import_srt", "davinci_tools",
+}
+
+SUPPORTER_FEATURE_LABELS = {
+    "batch_processing": "批次處理",
+    "quick_compare_full": "快速對照完整版",
+    "custom_rules": "個人化規則庫",
+    "diarization": "語者分離",
+    "domain_prompt_templates": "領域 Prompt 模板",
+    "custom_dictionary": "自訂詞庫",
+}
+
+
+def has_feature(feature_name: str) -> bool:
+    if LICENSE_MANAGER is not None:
+        try:
+            return LICENSE_MANAGER.has_feature(feature_name)
+        except Exception:
+            pass
+    return feature_name in _FALLBACK_FREE_FEATURES
+
+
+def license_status_summary() -> dict:
+    if LICENSE_MANAGER is not None:
+        try:
+            return LICENSE_MANAGER.status_summary()
+        except Exception:
+            pass
+    return {"mode": "free", "label": "Free", "trial_ends_at": "", "days_left": 0}
+
+
 DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
 _LEGACY_OPENROUTER_MODELS = tuple(getattr(CORE, "OPENROUTER_MODELS", ["google/gemma-3-27b-it:free"]))
 _LEGACY_LLM_CALL_ONCE = getattr(CORE, "_llm_call_once")
@@ -730,9 +797,13 @@ class GradientBackdrop(tk.Canvas):
         self.bind("<Configure>", self.draw)
 
     def draw(self, _event=None):
-        self.delete("all")
         width = max(1, self.winfo_width())
         height = max(1, self.winfo_height())
+        # 拖動視窗只會改位置不改尺寸：尺寸沒變就不重畫，避免拖動卡頓
+        if getattr(self, "_last_size", None) == (width, height):
+            return
+        self._last_size = (width, height)
+        self.delete("all")
         t_rgb = self.winfo_rgb(self.top)
         b_rgb = self.winfo_rgb(self.bottom)
         for y in range(height):
@@ -750,9 +821,13 @@ class GradientBar(tk.Canvas):
         self.bind("<Configure>", self.draw)
 
     def draw(self, _event=None):
-        self.delete("all")
         width = max(1, self.winfo_width())
         height = max(1, self.winfo_height())
+        # 尺寸沒變就不重畫（拖動視窗不觸發重繪）
+        if getattr(self, "_last_size", None) == (width, height):
+            return
+        self._last_size = (width, height)
+        self.delete("all")
         l_rgb = self.winfo_rgb(self.left)
         r_rgb = self.winfo_rgb(self.right)
         for x in range(width):
@@ -1181,7 +1256,7 @@ class App(ctk.CTk):
             diar_row,
             text="純文字標註語者（語者分離）",
             variable=self.diarize_enabled,
-            command=self.persist_basic_config,
+            command=self.on_diarize_toggle,
             fg_color=ORANGE, hover_color=ORANGE_DARK, checkmark_color="#FFFFFF",
             text_color=TEXT_ON_DARK, font=(FONT, 14, "bold"),
             checkbox_width=24, checkbox_height=24, corner_radius=7, border_width=2,
@@ -1662,17 +1737,83 @@ class App(ctk.CTk):
             return
         os.startfile(folder)
 
+    def on_diarize_toggle(self):
+        """語者分離開關：Supporter 功能，未解鎖時自動關回並提示。"""
+        if self.diarize_enabled.get() and not has_feature("diarization"):
+            self.diarize_enabled.set(False)
+            self.show_supporter_message("diarization")
+            return
+        self.persist_basic_config()
+
+    def show_supporter_message(self, feature_name: str):
+        """Supporter 功能提示：說明 Free 仍可完成核心工作，提供支持連結。"""
+        label = SUPPORTER_FEATURE_LABELS.get(feature_name, feature_name)
+        status = license_status_summary()
+        if status["mode"] == "trial":
+            status_line = (
+                f"你正在使用 Supporter Trial，到期日：{status['trial_ends_at']}。\n"
+                "試用結束後，SanWich 會回到 Free 模式，核心功能仍可繼續使用。"
+            )
+        else:
+            status_line = (
+                "你的 Supporter Trial 已結束。SanWich Free 仍可繼續使用。\n"
+                "如果 SanWich 幫你省下時間，歡迎用 NT$99 起支持開發。"
+            )
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"{label}｜Supporter 功能")
+        win.geometry("520x360")
+        win.configure(fg_color=BG)
+        self.apply_window_icon(win, "_setting.png")
+        win.transient(self)
+        win.grab_set()
+
+        box = ctk.CTkFrame(win, fg_color=CARD, corner_radius=28, border_width=1, border_color=LINE)
+        box.pack(fill="both", expand=True, padx=20, pady=20)
+        ctk.CTkLabel(
+            box, text=f"🔒 {label}", text_color=TEXT_ON_DARK, font=(FONT, 22, "bold")
+        ).pack(anchor="w", padx=24, pady=(22, 8))
+        ctk.CTkLabel(
+            box,
+            text=(
+                f"{label}是 Supporter 功能。\n"
+                "SanWich Free 仍可完成單檔字幕工作（辨識、校對、輸出、編輯）。\n\n"
+                f"{status_line}\n\n"
+                "支持開發可解鎖批次處理、快速對照完整版、個人化規則庫與語者分離。"
+            ),
+            text_color=MUTED_ON_DARK,
+            font=(FONT, 14),
+            justify="left",
+            anchor="w",
+            wraplength=440,
+        ).pack(anchor="w", padx=24, pady=(0, 16))
+
+        btns = ctk.CTkFrame(box, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(4, 22))
+        ctk.CTkButton(
+            btns, text="支持開發", width=140, height=42, corner_radius=21,
+            fg_color=ORANGE, hover_color=ORANGE_DARK, font=(FONT, 14, "bold"),
+            command=lambda: webbrowser.open_new_tab(WIKIVIBE_URL),
+        ).pack(side="left")
+        ctk.CTkButton(
+            btns, text="繼續使用 Free", width=140, height=42, corner_radius=21,
+            fg_color="#32333B", hover_color="#45464F", font=(FONT, 14),
+            command=win.destroy,
+        ).pack(side="left", padx=(12, 0))
+
     def open_settings(self):
         win = ctk.CTkToplevel(self)
         win.title("設定")
-        win.geometry("760x620")
+        # 高度依螢幕自動封頂，內容超出時可捲動
+        win_h = min(840, max(560, win.winfo_screenheight() - 160))
+        win.geometry(f"760x{win_h}")
         win.minsize(640, 520)
         win.configure(fg_color=BG)
         self.apply_window_icon(win, "_setting.png")
         win.transient(self)
         win.grab_set()
 
-        outer = ctk.CTkFrame(win, fg_color=CARD, corner_radius=34, border_width=1, border_color=LINE)
+        outer = ctk.CTkScrollableFrame(win, fg_color=CARD, corner_radius=34, border_width=1, border_color=LINE)
         outer.pack(fill="both", expand=True, padx=24, pady=24)
         outer.grid_columnconfigure(0, weight=1)
 
@@ -1810,7 +1951,7 @@ class App(ctk.CTk):
 
         ctk.CTkButton(
             actions,
-            text="個人化規則庫",
+            text=("個人化規則庫" if has_feature("custom_rules") else "個人化規則庫 🔒"),
             width=140,
             height=44,
             corner_radius=22,
@@ -1843,12 +1984,72 @@ class App(ctk.CTk):
             command=win.destroy,
         ).grid(row=0, column=3, sticky="e")
 
+        # ── Supporter 狀態與 Key ──────────────────────────────
+        supporter = ctk.CTkFrame(outer, fg_color=DARK_2, corner_radius=18)
+        supporter.grid(row=10, column=0, sticky="ew", padx=24, pady=(0, 14))
+        supporter.grid_columnconfigure(0, weight=1)
+
+        lic_status = license_status_summary()
+        lic_status_var = ctk.StringVar(value=f"版本狀態：{lic_status['label']}")
+        ctk.CTkLabel(
+            supporter,
+            textvariable=lic_status_var,
+            text_color=TEXT_ON_DARK,
+            font=(FONT, 14, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(12, 2))
+        ctk.CTkLabel(
+            supporter,
+            text="SanWich Free 永久可用。Supporter 解鎖批次處理、快速對照完整版、個人化規則庫與語者分離。",
+            text_color=MUTED_ON_DARK,
+            font=(FONT, 12),
+            anchor="w",
+            justify="left",
+            wraplength=620,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 8))
+
+        sup_key_var = ctk.StringVar(value="")
+        sup_key_entry = ctk.CTkEntry(
+            supporter,
+            textvariable=sup_key_var,
+            placeholder_text="輸入 Supporter Key（SW-XXXX-XXXX-XXXX-XXXX）",
+            height=38,
+            corner_radius=19,
+            fg_color="#222020",
+            border_color=LINE,
+            font=(EN_FONT, 13),
+        )
+        sup_key_entry.grid(row=2, column=0, sticky="ew", padx=(16, 10), pady=(0, 12))
+
+        def apply_supporter_key():
+            if LICENSE_MANAGER is None:
+                messagebox.showerror("無法啟用", "授權模組載入失敗，請確認 core/license_manager.py 存在。", parent=win)
+                return
+            if LICENSE_MANAGER.activate_key(sup_key_var.get()):
+                lic_status_var.set(f"版本狀態：{license_status_summary()['label']}")
+                sup_key_var.set("")
+                self.log("Supporter Key 已啟用，感謝支持 SanWich！", "success")
+                messagebox.showinfo("啟用成功", "Supporter 功能已解鎖，感謝你的支持！", parent=win)
+            else:
+                messagebox.showerror("Key 無效", "請確認 Supporter Key 是否輸入正確。", parent=win)
+
+        ctk.CTkButton(
+            supporter,
+            text="啟用 Key",
+            width=110,
+            height=38,
+            corner_radius=19,
+            fg_color=ORANGE,
+            hover_color=ORANGE_DARK,
+            font=(FONT, 13, "bold"),
+            command=apply_supporter_key,
+        ).grid(row=2, column=1, sticky="e", padx=(0, 16), pady=(0, 12))
+
         credits = ctk.CTkFrame(outer, fg_color="transparent")
-        credits.grid(row=10, column=0, sticky="ew", padx=24, pady=(0, 18))
+        credits.grid(row=11, column=0, sticky="ew", padx=24, pady=(0, 18))
         credits.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             credits,
-            text="v2.1.1",
+            text="v2.2",
             text_color=TEXT_ON_DARK,
             font=(EN_FONT, 12, "bold"),
         ).grid(row=0, column=0, sticky="w")
@@ -1903,6 +2104,14 @@ class App(ctk.CTk):
             return
         if not self.srt_enabled.get() and not self.txt_enabled.get():
             messagebox.showerror("未啟用任何輸出", "請至少開啟 SRT 或純文字其中一種輸出。")
+            return
+        if len(input_files) > 1 and not has_feature("batch_processing"):
+            self.show_supporter_message("batch_processing")
+            return
+        if self.diarize_enabled.get() and not has_feature("diarization"):
+            self.diarize_enabled.set(False)
+            self.persist_basic_config()
+            self.show_supporter_message("diarization")
             return
         if len(input_files) == 1:
             if self.srt_enabled.get() and not self.output_srt_path.get().strip():
@@ -4323,6 +4532,9 @@ class App(ctk.CTk):
         win.protocol("WM_DELETE_WINDOW", close_editor)
 
     def open_personal_rules_window(self, parent=None):
+        if not has_feature("custom_rules"):
+            self.show_supporter_message("custom_rules")
+            return
         """個人化規則庫管理視窗（階段 5 輪 B）。"""
         if PERSONAL_RULES is None:
             messagebox.showinfo("規則庫無法開啟", "找不到 core/personal_rules.py，請確認檔案完整。")
@@ -4996,6 +5208,9 @@ class App(ctk.CTk):
         return wrote
 
     def show_comparison(self):
+        if not has_feature("quick_compare_full"):
+            self.show_supporter_message("quick_compare_full")
+            return
         if not self.last_compare:
             messagebox.showinfo("尚無對照資料", "請先完成一次 AI 校對。")
             return

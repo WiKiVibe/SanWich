@@ -161,6 +161,13 @@ def summarise_candidates(
     return ordered[:MAX_RULES_PER_CALL]
 
 
+# 防膨脹預設參數（輪 C）— 必須定義在 RuleStore 之前，
+# 因為 class 內多個方法把它們當預設參數，def 執行當下就會求值。
+DEFAULT_CAP_PER_DOMAIN = 100      # 每個領域 active 上限
+DEFAULT_FREEZE_DAYS = 90          # 超過 N 天未使用 → 冷凍
+MERGE_SIMILARITY_THRESHOLD = 0.86 # SequenceMatcher ratio ≥ 此值且 after 完全相同 → 合併
+
+
 # ─────────────────────────────────────────────────────────────
 # RuleStore：規則庫的存取
 # ─────────────────────────────────────────────────────────────
@@ -468,11 +475,6 @@ def iter_edits_for_input(history_path: Path, input_path: str, since: _dt.datetim
 # 規則注入的硬上限，避免 prompt 過長吃 token
 MAX_RULE_SECTION_CHARS = 1500
 MAX_RULES_INJECTED = 30
-
-# 防膨脹預設參數（輪 C）
-DEFAULT_CAP_PER_DOMAIN = 100      # 每個領域 active 上限
-DEFAULT_FREEZE_DAYS = 90          # 超過 N 天未使用 → 冷凍
-MERGE_SIMILARITY_THRESHOLD = 0.86 # SequenceMatcher ratio ≥ 此值且 after 完全相同 → 合併
 
 
 def _rule_strength(rule: dict) -> tuple[int, int, str]:

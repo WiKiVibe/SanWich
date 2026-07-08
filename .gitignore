@@ -1,5 +1,7 @@
 # Local secrets and machine-specific settings
 config.json
+core/personal_rules.json
+debug_edition.txt
 .env
 *.env
 .codex_ssh/
@@ -59,6 +61,8 @@ install_log.txt
 gpu_detect_log.txt
 
 # Internal notes and design source files
+CLAUDE.md
+SUPPORTER_PLAN.md
 聲文去SanWich_工作計畫.md
 安裝包製作_踩雷與解法.md
 SanWich_分析報告*.md

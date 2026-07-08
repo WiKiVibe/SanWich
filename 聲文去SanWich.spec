@@ -25,7 +25,12 @@ datas = [
     ('assets/fonts/TASA_Explorer/README.txt', 'assets/fonts/TASA_Explorer'),
     ('assets/fonts/TASA_Explorer/OFL.txt',    'assets/fonts/TASA_Explorer'),
     ('core/SanWich_legacy_core.py', 'core'),
-    ('config.json', '.'),
+    ('core/features.py', 'core'),
+    ('core/license_manager.py', 'core'),
+    ('core/personal_rules.py', 'core'),
+    ('core/diarization.py', 'core'),
+    # 安全：絕不打包含真實 API Key 的 config.json；缺檔時程式會用預設值自動重建
+    ('config.example.json', '.'),
     ('申請API_Key教學.md', '.'),
 ]
 

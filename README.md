@@ -102,6 +102,34 @@ flowchart LR
 
 ---
 
+## 💛 Free / Supporter
+
+SanWich 的核心功能會持續免費開源。
+
+Free 版包含完整的單檔字幕工作流：本機語音辨識、AI 校對、SRT/TXT 輸出與基本字幕編輯器。
+
+Supporter 版提供 30 天完整試用。試用結束後，SanWich 會回到 Free 模式，核心功能仍可繼續使用。
+
+Supporter 版是支持 SanWich 持續開發的方式。作為感謝，Supporter 會解鎖一些重度使用者更需要的省時間功能，例如批次處理、AI 修改快速對照完整版與個人化規則庫。
+
+| 功能 | Free | Supporter |
+| --- | :---: | :---: |
+| 單檔音訊 / 影片轉 SRT / TXT | ✅ | ✅ |
+| 本機 Breeze-ASR-25 辨識 | ✅ | ✅ |
+| AI 總編輯校對 | ✅ | ✅ |
+| SRT 字幕編輯器、尋找取代、匯入外部 SRT | ✅ | ✅ |
+| DaVinci Tools | ✅ | ✅ |
+| 批次處理 | 🔒 | ✅ |
+| AI 修改快速對照完整版 | 🔒 | ✅ |
+| 個人化規則庫 | 🔒 | ✅ |
+| 語者分離（TXT 標註語者） | 🔒 | ✅ |
+
+SanWich 採用信任制授權。授權機制只做基本驗證與提醒，不會強制登入、不連網驗證，也不會因為授權問題鎖住 Free 功能。
+
+👉 支持開發：[portaly.cc/WiKiVibe](https://portaly.cc/WiKiVibe)
+
+---
+
 ## 🔐 資料與隱私
 
 ```mermaid

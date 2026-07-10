@@ -7,6 +7,7 @@ The legacy core is loaded read-only from an internal support file.
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import datetime as _dt
 import importlib.util
 import io
@@ -148,6 +149,101 @@ AI_REVIEW_BG = "#3A2A17"
 AI_REVIEW_BORDER = "#B45309"
 TIME_ERROR = "#DC2626"
 TIME_ERROR_BG = "#3B1818"
+
+KLF_ACTIVATE = 0x00000001
+ENGLISH_US_KEYBOARD = "00000409"
+_WIN32_INPUT_API_READY = False
+
+
+def init_win32_input_api() -> bool:
+    global _WIN32_INPUT_API_READY
+    if sys.platform != "win32":
+        return False
+    if _WIN32_INPUT_API_READY:
+        return True
+    try:
+        user32 = ctypes.windll.user32
+        imm32 = ctypes.windll.imm32
+        user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+        user32.GetKeyboardLayout.restype = wintypes.HANDLE
+        user32.LoadKeyboardLayoutW.argtypes = [wintypes.LPCWSTR, wintypes.UINT]
+        user32.LoadKeyboardLayoutW.restype = wintypes.HANDLE
+        user32.ActivateKeyboardLayout.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        user32.ActivateKeyboardLayout.restype = wintypes.HANDLE
+        imm32.ImmGetContext.argtypes = [wintypes.HWND]
+        imm32.ImmGetContext.restype = wintypes.HANDLE
+        imm32.ImmGetOpenStatus.argtypes = [wintypes.HANDLE]
+        imm32.ImmGetOpenStatus.restype = wintypes.BOOL
+        imm32.ImmSetOpenStatus.argtypes = [wintypes.HANDLE, wintypes.BOOL]
+        imm32.ImmSetOpenStatus.restype = wintypes.BOOL
+        imm32.ImmReleaseContext.argtypes = [wintypes.HWND, wintypes.HANDLE]
+        imm32.ImmReleaseContext.restype = wintypes.BOOL
+    except Exception:
+        return False
+    _WIN32_INPUT_API_READY = True
+    return True
+
+
+def win32_keyboard_layout() -> int | None:
+    if not init_win32_input_api():
+        return None
+    try:
+        return int(ctypes.windll.user32.GetKeyboardLayout(0))
+    except Exception:
+        return None
+
+
+def win32_ime_open(widget=None) -> bool | None:
+    if not init_win32_input_api() or widget is None:
+        return None
+    try:
+        hwnd = wintypes.HWND(int(widget.winfo_id()))
+        himc = ctypes.windll.imm32.ImmGetContext(hwnd)
+        if not himc:
+            return None
+        try:
+            return bool(ctypes.windll.imm32.ImmGetOpenStatus(himc))
+        finally:
+            ctypes.windll.imm32.ImmReleaseContext(hwnd, himc)
+    except Exception:
+        return None
+
+
+def win32_set_ime_open(widget=None, open_status: bool = False) -> None:
+    if not init_win32_input_api() or widget is None:
+        return
+    try:
+        hwnd = wintypes.HWND(int(widget.winfo_id()))
+        himc = ctypes.windll.imm32.ImmGetContext(hwnd)
+        if not himc:
+            return
+        try:
+            ctypes.windll.imm32.ImmSetOpenStatus(himc, bool(open_status))
+        finally:
+            ctypes.windll.imm32.ImmReleaseContext(hwnd, himc)
+    except Exception:
+        pass
+
+
+def win32_activate_keyboard_layout(layout: int | None) -> None:
+    if not init_win32_input_api() or not layout:
+        return
+    try:
+        ctypes.windll.user32.ActivateKeyboardLayout(wintypes.HANDLE(layout), 0)
+    except Exception:
+        pass
+
+
+def win32_force_english_input(widget=None) -> None:
+    if not init_win32_input_api():
+        return
+    try:
+        english_layout = ctypes.windll.user32.LoadKeyboardLayoutW(ENGLISH_US_KEYBOARD, KLF_ACTIVATE)
+        if english_layout:
+            ctypes.windll.user32.ActivateKeyboardLayout(english_layout, 0)
+        win32_set_ime_open(widget, False)
+    except Exception:
+        pass
 
 
 def load_local_fonts() -> None:
@@ -2523,6 +2619,7 @@ class App(ctk.CTk):
         playback = {"playing": False, "started_at": None, "started_from": 0.0, "after_id": None}
         saved_snapshot = {"chunks": clone_chunks(original_chunks)}
         undo_stack: list[list[dict]] = []
+        redo_stack: list[list[dict]] = []
         text_edit_started = {"index": None}
         playhead_items = {"line": None, "head": None}
         inline_editor = {"window": None, "text": None, "index": None}
@@ -2647,6 +2744,7 @@ class App(ctk.CTk):
                 ("↑ / ↓", "playhead 跳到選取字幕 進點 / 出點"),
                 ("Delete", "刪除選取字幕"),
                 ("Ctrl + Z", "復原"),
+                ("Ctrl + Shift + Z", "重做"),
                 ("Ctrl + F / Ctrl + H", "尋找 / 取代"),
             ]
             list_box = ctk.CTkScrollableFrame(tip, fg_color="transparent")
@@ -2687,7 +2785,7 @@ class App(ctk.CTk):
         transport = ctk.CTkFrame(timeline_shell, fg_color="transparent")
         transport.grid(row=1, column=0, sticky="ew", padx=14, pady=(8, 0))
         transport.grid_columnconfigure(2, weight=1)
-        transport.grid_columnconfigure(8, weight=1)
+        transport.grid_columnconfigure(9, weight=1)
         prev_btn = ctk.CTkButton(
             transport,
             text="⏮",
@@ -2700,7 +2798,7 @@ class App(ctk.CTk):
             font=(EN_FONT, 16, "bold"),
             command=lambda: goto_previous_caption(),
         )
-        prev_btn.grid(row=0, column=4, sticky="e", padx=(0, 8))
+        prev_btn.grid(row=0, column=5, sticky="e", padx=(0, 8))
         play_btn = ctk.CTkButton(
             transport,
             text="▶",
@@ -2713,7 +2811,7 @@ class App(ctk.CTk):
             font=(EN_FONT, 17, "bold"),
             command=lambda: toggle_playback(),
         )
-        play_btn.grid(row=0, column=5, sticky="e", padx=(0, 8))
+        play_btn.grid(row=0, column=6, sticky="e", padx=(0, 8))
         next_btn = ctk.CTkButton(
             transport,
             text="⏭",
@@ -2726,7 +2824,7 @@ class App(ctk.CTk):
             font=(EN_FONT, 16, "bold"),
             command=lambda: goto_next_caption(),
         )
-        next_btn.grid(row=0, column=6, sticky="e", padx=(0, 8))
+        next_btn.grid(row=0, column=7, sticky="e", padx=(0, 8))
         split_btn = ctk.CTkButton(
             transport,
             text="✂",
@@ -2739,7 +2837,7 @@ class App(ctk.CTk):
             font=(EN_FONT, 16, "bold"),
             command=lambda: split_caption_at_playhead(),
         )
-        split_btn.grid(row=0, column=7, sticky="e")
+        split_btn.grid(row=0, column=8, sticky="e")
         undo_btn = ctk.CTkButton(
             transport,
             text="↶",
@@ -2753,6 +2851,19 @@ class App(ctk.CTk):
             command=lambda: undo_last(),
         )
         undo_btn.grid(row=0, column=3, sticky="e", padx=(0, 8))
+        redo_btn = ctk.CTkButton(
+            transport,
+            text="↷",
+            width=38,
+            height=34,
+            corner_radius=17,
+            fg_color=DARK,
+            hover_color=GARNET,
+            text_color=TEXT_ON_DARK,
+            font=(EN_FONT, 16, "bold"),
+            command=lambda: redo_last(),
+        )
+        redo_btn.grid(row=0, column=4, sticky="e", padx=(0, 8))
         add_btn = ctk.CTkButton(
             transport,
             text="＋ 新增字幕",
@@ -2791,7 +2902,7 @@ class App(ctk.CTk):
             font=(FONT, 13, "bold"),
             command=lambda: show_find_replace(True),
         )
-        replace_btn.grid(row=0, column=9, sticky="e", padx=(0, 6))
+        replace_btn.grid(row=0, column=10, sticky="e", padx=(0, 6))
         delete_btn = ctk.CTkButton(
             transport,
             text="刪除",
@@ -2804,7 +2915,7 @@ class App(ctk.CTk):
             font=(FONT, 13, "bold"),
             command=lambda: delete_selected_captions(),
         )
-        delete_btn.grid(row=0, column=10, sticky="e")
+        delete_btn.grid(row=0, column=11, sticky="e")
         timeline_scroll = tk.Scrollbar(
             timeline_shell,
             orient="horizontal",
@@ -2858,6 +2969,64 @@ class App(ctk.CTk):
         timeline_redraw_job = {"id": None, "text_id": None, "resize_id": None}
         # 靜態層（背景/刻度/聲波）快取：只有縮放或畫布寬度改變才需要重建
         static_cache = {"zoom": None, "width": None}
+        input_mode_state = {
+            "layout": win32_keyboard_layout(),
+            "ime_open": win32_ime_open(win),
+            "english_active": False,
+        }
+
+        def remember_text_input_mode(widget=None):
+            if input_mode_state["english_active"]:
+                return
+            layout = win32_keyboard_layout()
+            if layout:
+                input_mode_state["layout"] = layout
+            ime_open = win32_ime_open(widget)
+            if ime_open is not None:
+                input_mode_state["ime_open"] = ime_open
+
+        def force_editor_english(widget=None):
+            remember_text_input_mode(widget)
+            win32_force_english_input(widget)
+            input_mode_state["english_active"] = True
+
+        def restore_text_input_mode(widget=None):
+            layout = input_mode_state.get("layout")
+            if layout:
+                win32_activate_keyboard_layout(layout)
+            ime_open = input_mode_state.get("ime_open")
+            if ime_open is not None:
+                win32_set_ime_open(widget, bool(ime_open))
+            input_mode_state["english_active"] = False
+
+        def input_widget_targets(widget):
+            seen = set()
+            for target in (widget, getattr(widget, "_entry", None), getattr(widget, "_textbox", None)):
+                if target is None:
+                    continue
+                ident = id(target)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                yield target
+
+        def mark_cjk_text_widget(widget):
+            for target in input_widget_targets(widget):
+                setattr(target, "_sanwich_allow_cjk_ime", True)
+                target.bind("<FocusIn>", lambda event: restore_text_input_mode(event.widget), add="+")
+                target.bind("<FocusOut>", lambda event: force_editor_english(event.widget), add="+")
+
+        def mark_english_widget(widget):
+            for target in input_widget_targets(widget):
+                setattr(target, "_sanwich_allow_cjk_ime", False)
+                target.bind("<FocusIn>", lambda event: force_editor_english(event.widget), add="+")
+
+        def sync_editor_input_mode(event):
+            widget = getattr(event, "widget", None)
+            if bool(getattr(widget, "_sanwich_allow_cjk_ime", False)):
+                restore_text_input_mode(widget)
+            else:
+                force_editor_english(widget)
 
         def chunks_equal(left: list[dict], right: list[dict]) -> bool:
             if len(left) != len(right):
@@ -3112,12 +3281,17 @@ class App(ctk.CTk):
                     end_entry.configure(bg=DARK_2, highlightbackground=LINE, highlightcolor=ORANGE)
                     if not skip_text:
                         text_box.configure(bg=DARK_2, highlightbackground=LINE, highlightcolor=ORANGE)
-        def push_undo():
+        def limit_history_stack(stack: list[list[dict]]) -> None:
+            if len(stack) > 80:
+                del stack[0 : len(stack) - 80]
+
+        def push_undo(clear_redo: bool = True):
             snapshot = clone_chunks(current_chunks_relaxed())
             if not undo_stack or not chunks_equal(undo_stack[-1], snapshot):
                 undo_stack.append(snapshot)
-                if len(undo_stack) > 80:
-                    del undo_stack[0]
+                limit_history_stack(undo_stack)
+            if clear_redo:
+                redo_stack.clear()
 
         def apply_chunks_to_rows(chunks: list[dict]):
             while len(rows) > len(chunks):
@@ -3139,8 +3313,22 @@ class App(ctk.CTk):
             if not undo_stack:
                 status_var.set("沒有可復原的動作")
                 return "break"
+            redo_stack.append(clone_chunks(current_chunks_relaxed()))
+            limit_history_stack(redo_stack)
             apply_chunks_to_rows(undo_stack.pop())
             status_var.set("已復原上一個動作")
+            return "break"
+
+        def redo_last(_event=None):
+            if isinstance(getattr(_event, "widget", None), (tk.Text, tk.Entry)):
+                return None
+            if not redo_stack:
+                status_var.set("沒有可重做的動作")
+                return "break"
+            undo_stack.append(clone_chunks(current_chunks_relaxed()))
+            limit_history_stack(undo_stack)
+            apply_chunks_to_rows(redo_stack.pop())
+            status_var.set("已重做上一個動作")
             return "break"
 
         def snap_time(value: float, candidates: list[float], threshold: float = 0.12) -> float:
@@ -3397,6 +3585,7 @@ class App(ctk.CTk):
                 font=(FONT, 12, "bold"),
                 undo=True,
             )
+            mark_cjk_text_widget(editor)
             editor.insert("1.0", rows[row_index]["text"].get("1.0", "end").strip())
             window_id = timeline_canvas.create_window(
                 x1 + 10,
@@ -3408,7 +3597,7 @@ class App(ctk.CTk):
             )
             inline_editor.update({"window": window_id, "text": editor, "index": row_index})
             editor.focus_set()
-            editor.bind("<FocusOut>", lambda _event: close_inline_editor(commit=True))
+            editor.bind("<FocusOut>", lambda _event: close_inline_editor(commit=True), add="+")
             editor.bind("<Control-Return>", lambda _event: close_inline_editor(commit=True) or "break")
             editor.bind("<Escape>", lambda _event: close_inline_editor(commit=False) or "break")
 
@@ -3581,6 +3770,7 @@ class App(ctk.CTk):
             if isinstance(event.widget, (tk.Text, tk.Entry)):
                 return None
             text_edit_started["index"] = None
+            force_editor_english(event.widget)
             try:
                 timeline_canvas.focus_set()
             except Exception:
@@ -3688,6 +3878,7 @@ class App(ctk.CTk):
 
         def on_timeline_press(event):
             timeline_canvas.focus_set()
+            force_editor_english(timeline_canvas)
             if inline_editor.get("text") is not None and event.widget is timeline_canvas:
                 close_inline_editor(commit=True)
             found = timeline_canvas.find_withtag("current")
@@ -3857,6 +4048,7 @@ class App(ctk.CTk):
         def on_timeline_shift_press(event):
             # Shift+左鍵：從目前主選取到點擊處，範圍連續選取（供合併使用）
             timeline_canvas.focus_set()
+            force_editor_english(timeline_canvas)
             drag_state.update({"index": None, "mode": "", "offset": 0.0, "duration": 0.0, "moved": False})
             idx = block_index_at_event(event)
             if idx is None:
@@ -3876,6 +4068,7 @@ class App(ctk.CTk):
         def on_timeline_ctrl_toggle(event):
             # Ctrl+右鍵（或 Ctrl+左鍵）：加選 / 取消選取單一字幕方塊
             timeline_canvas.focus_set()
+            force_editor_english(timeline_canvas)
             drag_state.update({"index": None, "mode": "", "offset": 0.0, "duration": 0.0, "moved": False})
             idx = block_index_at_event(event)
             if idx is None:
@@ -3981,10 +4174,12 @@ class App(ctk.CTk):
             ctk.CTkLabel(box, text="尋找", text_color=TEXT_ON_DARK, font=(FONT, 14, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(16, 8))
             find_entry = ctk.CTkEntry(box, textvariable=find_var, height=38, fg_color=DARK_2, border_color=LINE, text_color=TEXT_ON_DARK, font=(FONT, 14))
             find_entry.grid(row=0, column=1, sticky="ew", padx=(0, 16), pady=(16, 8))
+            mark_cjk_text_widget(find_entry)
             if replace_mode:
                 ctk.CTkLabel(box, text="取代為", text_color=TEXT_ON_DARK, font=(FONT, 14, "bold")).grid(row=1, column=0, sticky="w", padx=16, pady=8)
                 repl_entry = ctk.CTkEntry(box, textvariable=repl_var, height=38, fg_color=DARK_2, border_color=LINE, text_color=TEXT_ON_DARK, font=(FONT, 14))
                 repl_entry.grid(row=1, column=1, sticky="ew", padx=(0, 16), pady=8)
+                mark_cjk_text_widget(repl_entry)
 
             search_state = {"pos": -1}
 
@@ -4112,13 +4307,22 @@ class App(ctk.CTk):
                 pady=5,
                 font=(FONT, 13),
             )
+            mark_english_widget(start_entry)
+            mark_english_widget(end_entry)
+            mark_cjk_text_widget(text_box)
             text_box.insert("1.0", (chunk.get("text") or "").strip())
             row.update({"start": start_var, "end": end_var, "text": text_box, "widgets": [num_btn, start_entry, end_entry, text_box]})
             num_btn.grid(row=0, column=0, sticky="nw", padx=(0, 8), pady=(2, 6))
             start_entry.grid(row=0, column=1, sticky="nw", padx=(0, 8), pady=(4, 6))
             end_entry.grid(row=0, column=2, sticky="nw", padx=(0, 8), pady=(4, 6))
             text_box.grid(row=0, column=3, sticky="ew", pady=(2, 6))
-            text_box.bind("<FocusIn>", lambda _event, r=row: select_row(row_index_for(r)))
+
+            def on_caption_text_focus(_event, r=row):
+                idx = row_index_for(r)
+                begin_text_edit(idx)
+                select_row(idx)
+
+            text_box.bind("<FocusIn>", on_caption_text_focus, add="+")
             text_box.bind("<KeyRelease>", lambda _event: schedule_text_redraw())
             start_var.trace_add("write", schedule_timeline_draw)
             end_var.trace_add("write", schedule_timeline_draw)
@@ -4266,10 +4470,13 @@ class App(ctk.CTk):
         timeline_canvas.bind("<ButtonPress-2>", on_middle_press)
         timeline_canvas.bind("<B2-Motion>", on_middle_drag)
         timeline_canvas.bind("<ButtonRelease-2>", on_middle_release)
+        win.bind("<FocusIn>", sync_editor_input_mode, add="+")
         win.bind("<Button-1>", clear_text_focus, add="+")
         timeline_canvas.bind("<KeyPress-space>", on_editor_space)
         timeline_canvas.bind("<Control-z>", undo_last)
         timeline_canvas.bind("<Control-Z>", undo_last)
+        timeline_canvas.bind("<Control-Shift-z>", redo_last)
+        timeline_canvas.bind("<Control-Shift-Z>", redo_last)
         timeline_canvas.bind("<Control-f>", lambda _event: show_find_replace(False) or "break")
         timeline_canvas.bind("<Control-F>", lambda _event: show_find_replace(False) or "break")
         timeline_canvas.bind("<Control-h>", lambda _event: show_find_replace(True) or "break")
@@ -4287,6 +4494,10 @@ class App(ctk.CTk):
         timeline_canvas.bind("<KeyPress-P>", set_out_and_next_in_to_playhead)
         timeline_canvas.bind("<KeyPress-c>", split_caption_at_playhead)
         timeline_canvas.bind("<KeyPress-C>", split_caption_at_playhead)
+        win.bind("<Control-z>", undo_last, add="+")
+        win.bind("<Control-Z>", undo_last, add="+")
+        win.bind("<Control-Shift-z>", redo_last, add="+")
+        win.bind("<Control-Shift-Z>", redo_last, add="+")
         def on_zoom_slider(_value):
             anchor_time = float(playhead["time"])
             draw_timeline()
@@ -4295,6 +4506,7 @@ class App(ctk.CTk):
 
         zoom_slider.configure(command=on_zoom_slider)
         draw_timeline()
+        win.after_idle(lambda: force_editor_english(timeline_canvas))
 
         def collect_chunks() -> list[dict]:
             updated = []

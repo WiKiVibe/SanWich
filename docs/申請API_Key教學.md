@@ -1,4 +1,4 @@
-# 聲文去SanWich — API Key 申請教學
+# SanWich — API Key 申請教學
 
 > 想開啟 AI 校對，請先申請任一家 API Key，然後填到軟體的「設定（齒輪）→ API Key」。
 > 更新日期：2026-06-17

@@ -1,6 +1,6 @@
 # -*- coding: ascii -*-
 """Print the correct PyTorch wheel index URL for the installed NVIDIA GPU.
-Robust multi-source detection; writes gpu_detect_log.txt next to this script."""
+Legacy diagnostic helper; writes gpu_detect_log.txt next to this script."""
 import subprocess, re, os, sys
 
 BASE = "https://download.pytorch.org/whl/"

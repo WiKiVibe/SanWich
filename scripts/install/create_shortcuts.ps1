@@ -1,17 +1,11 @@
 $ErrorActionPreference = "Stop"
 
-# Works in both layouts:
-#   repo root  : run_app target = 02_launch.bat (this folder)
-#   zip app dir: run_app.bat exists next to this script
+# Source-checkout helper. Release packages receive their own generated copy.
 $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PackageDir = Split-Path -Parent $AppDir
+$PackageDir = (Resolve-Path (Join-Path $AppDir '..\..')).Path
 
-$Target = Join-Path $AppDir "run_app.bat"
-if (!(Test-Path -LiteralPath $Target)) {
-    $Target = Join-Path $AppDir "02_launch.bat"
-    $PackageDir = $AppDir
-}
-$Icon = Join-Path $AppDir "assets\images\_LOGO.ico"
+$Target = Join-Path $PackageDir "02_launch.bat"
+$Icon = Join-Path $PackageDir "assets\images\_LOGO.ico"
 
 if (!(Test-Path -LiteralPath $Target)) {
     throw "Shortcut target not found: $Target"
@@ -24,7 +18,7 @@ function New-SanWichShortcut {
 
     $Shortcut = $Shell.CreateShortcut($Path)
     $Shortcut.TargetPath = $Target
-    $Shortcut.WorkingDirectory = $AppDir
+    $Shortcut.WorkingDirectory = $PackageDir
     $Shortcut.Description = "SanWich"
     if (Test-Path -LiteralPath $Icon) {
         $Shortcut.IconLocation = $Icon

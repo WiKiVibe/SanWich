@@ -1022,7 +1022,7 @@ class DualASRApp(BaseTk):
 
         if not _HAS_JIEBA:
             self.log("提示：未安裝 jieba 套件，字幕換行將使用舊版逐字斷行方式。"
-                     "可執行 聲文去SanWich_setup.bat 重新安裝以啟用智慧斷詞換行。", tag="warn")
+                     "可執行 01_setup.bat 重新安裝以啟用智慧斷詞換行。", tag="warn")
         if not _HAS_DND:
             self.log("提示：未安裝 tkinterdnd2，拖放檔案功能暫不可用；仍可用「選擇檔案」一次選多個檔案。", tag="warn")
 

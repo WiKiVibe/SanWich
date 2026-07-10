@@ -2,8 +2,8 @@
 """setup_torch.py - detect GPU, pick the right PyTorch CUDA build, install, verify.
 
 Single source of truth for torch installation (Packaging Playbook section 3).
-Called by: SanWich_setup.bat / SETUP_ASCII.bat / INSTALL.bat (one line each).
-Run with the VENV python:  .venv\\Scripts\\python.exe setup_torch.py [--detect]
+Called by: 01_setup.bat.
+Run from the repo root: .venv\\Scripts\\python.exe scripts\\install\\setup_torch.py [--detect]
 
 Mapping (compute capability; future cards land on the top row automatically):
   CC >= 12.0 (Blackwell, RTX 50xx+)        -> cu128

@@ -160,36 +160,21 @@ flowchart TB
 | ✨ LLM | Gemini / DeepSeek | 設定視窗選供應商填 API Key 即可，皆有免費額度可先試 |
 | 💾 硬碟 | 預留約 4 GB | 首次執行會下載 Breeze-ASR-25 模型（約 3–4 GB） |
 
-API Key 申請步驟見 [`申請API_Key教學.md`](./申請API_Key教學.md)。
+API Key 申請步驟見 [`docs/申請API_Key教學.md`](./docs/申請API_Key教學.md)。
 
 ---
 
 ## 🚀 安裝與使用
 
-### 安裝
+### 一般使用者安裝
 
-一般使用者請到右側 **Releases** 下載 `SanWich_setup.zip`，完整解壓縮後執行：
-
-```bat
-01_setup.bat
-```
-
-如果你是從 GitHub 原始碼頁面下載或 clone 專案，也可以在專案根目錄執行：
+請到右側 **Releases** 下載最新版 `SanWich_setup.zip`，完整解壓縮後執行：
 
 ```bat
 01_setup.bat
 ```
 
 腳本會建立 `.venv`、偵測 GPU 並安裝對應版本 PyTorch 與必要套件。
-
-也可以手動安裝：
-
-```bat
-python -m venv .venv
-.venv\Scripts\python -m pip install --upgrade pip setuptools wheel
-.venv\Scripts\python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-.venv\Scripts\python -m pip install -r requirements.txt
-```
 
 
 ### 開始使用
@@ -199,6 +184,10 @@ python -m venv .venv
 3. 勾選輸出格式（SRT / TXT），決定是否開啟 AI 校對
 4. 按開始，等辨識完成
 5. 用內建編輯器精修，匯出
+
+### 從原始碼執行
+
+開發者可 clone 專案後在根目錄執行 `01_setup.bat`，再執行 `02_launch.bat`。打包、測試與診斷工具集中放在 [`scripts`](./scripts) 目錄，一般使用者不需要操作。
 
 ---
 

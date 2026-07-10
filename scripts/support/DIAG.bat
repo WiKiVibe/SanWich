@@ -1,6 +1,6 @@
 @echo off
-cd /d "%~dp0"
-set "LOG=%~dp0diag_log.txt"
+cd /d "%~dp0\..\.."
+set "LOG=%CD%\diag_log.txt"
 echo SanWich diagnostic > "%LOG%"
 echo Time: %date% %time% >> "%LOG%"
 echo Folder: %cd% >> "%LOG%"

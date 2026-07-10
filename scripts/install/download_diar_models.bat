@@ -1,5 +1,6 @@
 @echo off
 setlocal
+rem Release-packaging helper; normally invoked from the packaged app folder.
 cd /d "%~dp0"
 chcp 437 > nul
 set "DEST=_diar_candidates"

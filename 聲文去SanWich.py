@@ -30,7 +30,7 @@ from tkinter import filedialog, messagebox
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.3"
+APP_VERSION = "2.3.1"
 GITHUB_RELEASE_API = "https://api.github.com/repos/WiKiVibe/SanWich/releases/latest"
 GITHUB_TAGS_API = "https://api.github.com/repos/WiKiVibe/SanWich/tags?per_page=1"
 GITHUB_RELEASES_URL = "https://github.com/WiKiVibe/SanWich/releases/latest"

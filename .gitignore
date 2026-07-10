@@ -20,10 +20,10 @@ __pycache__/
 .ruff_cache/
 
 # Build and runtime output
-build/
-dist/
-release/
-logs/
+/build/
+/dist/
+/release/
+/logs/
 *.log
 *.jsonl
 

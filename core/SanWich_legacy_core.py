@@ -64,7 +64,8 @@ ENTRY_BG     = "#0F151C"
 # ── 總編輯 Prompt（SRT 結構鎖死版）─────────────────────────
 EDITOR_SYSTEM_PROMPT = (
     "你是一個台灣電視節目的字幕總編輯。我會提供你一段標準的 SRT 字幕檔案。\n"
-    "你的任務是校正辨識錯字、標點與專有名詞，讓字幕自然、準確、可播出；不要重寫成摘要。\n\n"
+    "你的任務是校正辨識錯字與專有名詞，讓字幕自然、準確、可播出；不要重寫成摘要。"
+    "標點符號僅在明顯錯誤時才修改，不要為了風格或個人偏好重排標點。\n\n"
     "【鋼鐵律令：時間碼框架絕對鎖死，文字允許流動】\n"
     "1. 「序號」與「時間碼」（例如 00:01:23,456 --> 00:01:25,123）是不可觸碰的底線。輸入有幾組，輸出就必須有幾組，絕對不可刪除、合併或修改時間碼。\n"
     "2. 「文字內容」是流動的。你可以為了語意通順，將文字跨組搬移到上一組或下一組，只要確保「時間碼與序號」的框架原封不動即可。\n"
@@ -74,7 +75,7 @@ EDITOR_SYSTEM_PROMPT = (
     "2. 【「姐」與「姊」的嚴格區分】：口語中的尊稱、稱呼（如：長輩、同事、熟人、車友），一律使用「姐姐」、「姐」。除非上下文明確指出對方是「有血緣關係的親生姊姊」，才可以使用女字旁的「姊姊」、「姊」。\n"
     "3. 只刪除明顯不影響語意的口水詞與重複語氣詞（如：嗯、啊、喔、那個、就是、對對對、然後然後）。如果刪除後會讓原意變短、變弱或少掉資訊，請保留原句。\n"
     "4. 嚴禁把逐字稿改寫成精簡摘要；不得自行濃縮、合併重點、刪掉細節、改變說話者語氣或新增原文沒有的內容。\n"
-    "5. 儘量維持原字幕字數與資訊量。除了明顯錯字、標點、斷句、專有名詞與無意義贅詞外，不要大幅縮短句子。\n"
+    "5. 儘量維持原字幕字數與資訊量。除了明顯錯字、斷句、專有名詞與無意義贅詞外，不要大幅縮短句子。\n"
     "6. 數字統一為阿拉伯數字（二零二六→2026）。英文專有名詞統一常用大小寫（AI、API、DaVinci）。人稱指人類用「他」，指非人類（軟體、摩托車、系統）一律用「它」。\n"
     "7. 【「或是」強制跨組搬移】：當某組字幕的結尾是「或是」時，請將「或是」搬移至下一組字幕的開頭。此為合法的文字流動，請安心執行。\n"
     "   例如輸入：\n"
@@ -367,67 +368,80 @@ def srt_text_width(text: str) -> float:
     return sum(srt_char_width(ch) for ch in text)
 
 
-def wrap_srt_text(text: str, max_width: float = SRT_MAX_LINE_WIDTH) -> list[str]:
-    """以 jieba 斷詞為單位換行，避免把一個詞語從中間切斷。
-    若未安裝 jieba，退回逐字斷行（與舊版相同）。"""
-    text = text.replace("\r", "").replace("\n", "")
-    if not text.strip():
-        return []
-
-    if not _HAS_JIEBA:
-        lines: list[str] = []
-        line = ""
-        width = 0.0
-        for ch in text:
-            if ch.isspace() and not line:
-                continue
-            ch_width = srt_char_width(ch)
-            if line and width + ch_width > max_width:
-                lines.append(line.rstrip())
-                line, width = "", 0.0
-                if ch.isspace():
-                    continue
-            line += ch
-            width += ch_width
-        if line.strip():
-            lines.append(line.rstrip())
-        return lines or ([text] if text else [])
-
-    words = [w for w in jieba.cut(text) if w]
-
-    lines: list[str] = []
+def _hard_split_token(token: str, max_width: float) -> list[str]:
+    """單一詞本身就比一行還寬（例如超長英文單字），只能逐字硬切。"""
+    parts: list[str] = []
     line = ""
     width = 0.0
-    for w in words:
-        if w.isspace() and not line:
-            continue
-        w_width = srt_text_width(w)
-
-        if line and width + w_width > max_width:
-            lines.append(line.rstrip())
+    for ch in token:
+        ch_width = srt_char_width(ch)
+        if line and width + ch_width > max_width:
+            parts.append(line)
             line, width = "", 0.0
-            if w.isspace():
-                continue
+        line += ch
+        width += ch_width
+    if line:
+        parts.append(line)
+    return parts
 
-        # 單一詞本身就比一行還寬（例如很長的英文單字），只能逐字硬切
-        if w_width > max_width:
-            for ch in w:
-                ch_width = srt_char_width(ch)
-                if line and width + ch_width > max_width:
-                    lines.append(line.rstrip())
-                    line, width = "", 0.0
-                    if ch.isspace():
-                        continue
-                line += ch
-                width += ch_width
+
+def _balanced_split(tokens: list[str], max_width: float,
+                    min_tail: float = 4.0) -> list[str]:
+    """在詞界中找最佳切點，遞迴切到每行都不超寬。
+    評分：越平衡越好；斷在空格（自然停頓）大加分；產生過短行大扣分。"""
+    text = "".join(tokens).strip()
+    if not text:
+        return []
+    if srt_text_width(text) <= max_width:
+        return [text]
+
+    best_i = None
+    best_score = None
+    for i in range(1, len(tokens)):
+        left = "".join(tokens[:i]).strip()
+        right = "".join(tokens[i:]).strip()
+        if not left or not right:
             continue
+        wl = srt_text_width(left)
+        wr = srt_text_width(right)
+        score = abs(wl - wr)                      # 兩邊越平均越好
+        if tokens[i - 1].isspace() or tokens[i].isspace():
+            score -= 8.0                          # 優先斷在空格（自然停頓）
+        if wl < min_tail or wr < min_tail:
+            score += 100.0                        # 避免「人」「知道」這種孤兒行
+        if best_score is None or score < best_score:
+            best_i, best_score = i, score
 
-        line += w
-        width += w_width
+    if best_i is None:
+        return _hard_split_token(text, max_width)
+    return (_balanced_split(tokens[:best_i], max_width, min_tail)
+            + _balanced_split(tokens[best_i:], max_width, min_tail))
 
-    if line.strip():
-        lines.append(line.rstrip())
-    return lines or ([text] if text else [])
+
+def wrap_srt_text(text: str, max_width: float = SRT_MAX_LINE_WIDTH) -> list[str]:
+    """超寬時不再貪婪塞滿：優先斷在空格，其次在 jieba 詞界找最平衡的切點，
+    並避免產生過短的孤兒行。未安裝 jieba 時退回逐字為單位做平衡切分。"""
+    text = text.replace("\r", "").replace("\n", "").strip()
+    if not text:
+        return []
+    if srt_text_width(text) <= max_width:
+        return [text]
+
+    if _HAS_JIEBA:
+        tokens = [w for w in jieba.cut(text) if w]
+    else:
+        tokens = list(text)
+
+    # 先處理本身就超寬的單一詞（例如超長英文單字）
+    fixed: list[str] = []
+    for w in tokens:
+        if srt_text_width(w) > max_width:
+            fixed.extend(_hard_split_token(w, max_width))
+        else:
+            fixed.append(w)
+
+    lines = [ln.strip() for ln in _balanced_split(fixed, max_width)]
+    return [ln for ln in lines if ln] or [text]
 
 
 def chunks_to_srt(chunks: list[dict]) -> str:
@@ -510,6 +524,34 @@ def chunks_to_plain(chunks: list[dict], fallback: str = "") -> str:
         return text
     fallback = fallback.strip()
     return fallback + ("。" if fallback and _needs_punct(fallback) else "")
+
+
+def suppress_repeat_hallucination(chunks: list[dict], min_run: int = 5,
+                                  max_len: int = 6) -> tuple[list[dict], int]:
+    """清除 Whisper 類模型在靜音／音樂段常見的重複幻覺（例如 OK 連續數十組）。
+    連續 min_run 組以上、文字完全相同且很短（≤ max_len 字）→ 保留第一組、其餘刪除。
+    真人不會以固定節奏連續講數十次相同短句，誤殺風險極低。
+    回傳 (清理後的 chunks, 被刪除的組數)。"""
+    def _norm(c: dict) -> str:
+        return strip_punct_for_srt((c.get("text") or "").strip()).casefold()
+
+    result: list[dict] = []
+    removed = 0
+    i = 0
+    n = len(chunks)
+    while i < n:
+        key = _norm(chunks[i])
+        j = i + 1
+        while j < n and key and _norm(chunks[j]) == key:
+            j += 1
+        run = j - i
+        if key and run >= min_run and len(key) <= max_len:
+            result.append(chunks[i])   # 保留第一組，其餘視為幻覺刪除
+            removed += run - 1
+        else:
+            result.extend(chunks[i:j])
+        i = j
+    return result, removed
 
 
 
@@ -1947,6 +1989,9 @@ class DualASRApp(BaseTk):
                 nc["timestamp"] = (st + offset, en + offset)
                 chunks.append(nc)
 
+        chunks, removed = suppress_repeat_hallucination(chunks)
+        if removed:
+            self.log(f"偵測到連續重複的幻覺字幕，已自動清除 {removed} 組。", tag="warn")
         return punctuate_chunks(chunks), "".join(texts)
 
     def _process_one(self, inp: str, srt: str, txt: str,

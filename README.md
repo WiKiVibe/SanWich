@@ -98,7 +98,7 @@ flowchart LR
 - 匯出時彈出建議清單，勾選要收進規則庫的（可分領域：通用 / 訪談 / 新聞 / 科技 / 教學）
 - 下次 AI 校對時自動把你的規則注入 Prompt，同樣的錯不用改第二次
 - 自動追蹤採納率，久未使用的規則自動冷凍、相似規則自動合併，規則庫不會無限膨脹
-- 規則存在本機 `core/personal_rules.json`，不會上傳
+- 規則存在本機 `%APPDATA%\SanWich\personal_rules.json`，更新程式不會覆寫，也不會上傳
 
 ---
 
@@ -148,7 +148,7 @@ flowchart TB
 | 📝 辨識後文字 | 只有開啟 AI 校對時，送往你設定的 LLM 供應商 |
 | 🧠 個人化規則庫 | 本機 |
 | 🕘 編輯歷史 | 本機 |
-| 🔑 API Key | 本機 `config.json`（已被 `.gitignore` 排除，請勿上傳） |
+| 🔑 API Key | 本機 `%APPDATA%\SanWich\config.json`（更新程式不會覆寫） |
 
 ---
 

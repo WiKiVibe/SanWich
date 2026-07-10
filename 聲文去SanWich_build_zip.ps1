@@ -133,7 +133,7 @@ Copy-IfExists (Join-Path $Root "assets\fonts\TASA_Explorer\TASAExplorer-Variable
 Copy-IfExists (Join-Path $Root "assets\fonts\TASA_Explorer\README.txt") (Join-Path $AppAssets "fonts\TASA_Explorer\README.txt")
 Copy-IfExists (Join-Path $Root "assets\fonts\TASA_Explorer\OFL.txt") (Join-Path $AppAssets "fonts\TASA_Explorer\OFL.txt")
 
-Write-CleanConfig (Join-Path $AppDir "config.json")
+Write-CleanConfig (Join-Path $AppDir "config.example.json")
 
 $InternalRunText = @(
     '@echo off',

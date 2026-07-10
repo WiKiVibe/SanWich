@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import types
+import urllib.request
 import wave
 import webbrowser
 from array import array
@@ -29,10 +30,77 @@ from tkinter import filedialog, messagebox
 
 
 ROOT = Path(__file__).resolve().parent
+APP_VERSION = "2.3"
+GITHUB_RELEASE_API = "https://api.github.com/repos/WiKiVibe/SanWich/releases/latest"
+GITHUB_TAGS_API = "https://api.github.com/repos/WiKiVibe/SanWich/tags?per_page=1"
+GITHUB_RELEASES_URL = "https://github.com/WiKiVibe/SanWich/releases/latest"
 
 
 def here() -> Path:
     return ROOT
+
+
+def user_data_dir() -> Path:
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(base) / "SanWich"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "SanWich"
+    return Path.home() / ".config" / "SanWich"
+
+
+def prepare_user_file(filename: str, legacy_path: Path) -> Path:
+    """Return a persistent user-data path and migrate once without overwriting."""
+    target = user_data_dir() / filename
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists() and legacy_path.exists():
+            shutil.copy2(legacy_path, target)
+        return target
+    except Exception:
+        return legacy_path
+
+
+CONFIG_PATH = prepare_user_file("config.json", ROOT / "config.json")
+PERSONAL_RULES_PATH = prepare_user_file(
+    "personal_rules.json",
+    ROOT / "core" / "personal_rules.json",
+)
+
+
+def version_tuple(value: str) -> tuple[int, int, int]:
+    numbers = [int(part) for part in re.findall(r"\d+", value or "")[:3]]
+    return tuple((numbers + [0, 0, 0])[:3])
+
+
+def fetch_latest_release(timeout: float = 5.0) -> dict:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"SanWich/{APP_VERSION}",
+    }
+    try:
+        request = urllib.request.Request(GITHUB_RELEASE_API, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if isinstance(data, dict) and data.get("tag_name"):
+            return data
+    except Exception:
+        pass
+
+    request = urllib.request.Request(GITHUB_TAGS_API, headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        tags = json.loads(response.read().decode("utf-8"))
+    if not isinstance(tags, list) or not tags or not tags[0].get("name"):
+        raise ValueError("GitHub response is missing a release or version tag")
+    tag = str(tags[0]["name"])
+    return {
+        "tag_name": tag,
+        "html_url": f"https://github.com/WiKiVibe/SanWich/releases/tag/{tag}",
+    }
+
+
+def is_newer_version(latest: str, current: str = APP_VERSION) -> bool:
+    return version_tuple(latest) > version_tuple(current)
 
 
 def asset_path(*parts: str) -> Path:
@@ -325,7 +393,7 @@ CORE = load_legacy_core()
 # 導正路徑：core 以 importlib 載入，其 __file__ 位於 core/ 子資料夾，
 # 會使 app_dir() 多算一層；強制以主程式所在資料夾(ROOT)為基準。
 CORE.app_dir = lambda: ROOT
-CORE.CONFIG_PATH = ROOT / "config.json"
+CORE.CONFIG_PATH = CONFIG_PATH
 
 
 def load_personal_rules() -> types.ModuleType | None:
@@ -469,8 +537,7 @@ def _resolve_personal_rules_state():
     if PERSONAL_RULES is None:
         return None, [], False
     try:
-        rules_path = here() / "core" / "personal_rules.json"
-        store = PERSONAL_RULES.RuleStore(rules_path)
+        store = PERSONAL_RULES.RuleStore(PERSONAL_RULES_PATH)
         return store, [], True
     except Exception:
         return None, [], False
@@ -487,7 +554,7 @@ def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
     use_rules = bool(cfg.get("use_personal_rules", True)) and PERSONAL_RULES is not None
     if use_rules:
         try:
-            rules_store = PERSONAL_RULES.RuleStore(here() / "core" / "personal_rules.json")
+            rules_store = PERSONAL_RULES.RuleStore(PERSONAL_RULES_PATH)
             rules_used = PERSONAL_RULES.select_rules_for_prompt(
                 rules_store,
                 domain=str(cfg.get("personal_rules_domain") or "通用"),
@@ -643,7 +710,8 @@ def chunks_to_editable_srt(chunks: list[dict]) -> str:
         ts = chunk.get("timestamp") or (0.0, 0.0)
         start = CORE.seconds_to_srt_time(ts[0] if ts[0] is not None else 0.0)
         end = CORE.seconds_to_srt_time(ts[1] if ts[1] is not None else (ts[0] or 0.0) + 2.0)
-        text = (chunk.get("text") or "").strip()
+        # SRT 一律無標點（與 chunks_to_srt 一致）；保留使用者手動的換行
+        text = CORE.strip_punct_for_srt((chunk.get("text") or "").strip())
         lines.extend([str(idx), f"{start} --> {end}", text, ""])
     return "\n".join(lines).strip() + "\n"
 
@@ -757,7 +825,7 @@ class InfoBubble(ctk.CTkLabel):
             text="i",
             width=24,
             height=24,
-            corner_radius=12,
+            corner_radius=9,
             fg_color="transparent",
             text_color=text_color,
             font=(FONT, 12, "bold"),
@@ -784,7 +852,7 @@ class InfoBubble(ctk.CTkLabel):
             except Exception:
                 pass
         self.tip.geometry(f"+{self.winfo_rootx()+18}+{self.winfo_rooty()+28}")
-        box = ctk.CTkFrame(self.tip, fg_color=self.tip_fg, corner_radius=14, border_width=0)
+        box = ctk.CTkFrame(self.tip, fg_color=self.tip_fg, corner_radius=10, border_width=0)
         box.pack(padx=1, pady=1)
         ctk.CTkLabel(
             box,
@@ -846,12 +914,21 @@ class WikiVibeLink(ctk.CTkFrame):
         self.qr_popup = tk.Toplevel(self)
         self.qr_popup.overrideredirect(True)
         self.qr_popup.attributes("-topmost", True)
-        self.qr_popup.configure(bg="#0C0D12")
+        transparent_color = "#010203"
+        popup_bg = "#FFFFFF"
+        if sys.platform == "win32":
+            try:
+                self.qr_popup.wm_attributes("-transparentcolor", transparent_color)
+                if str(self.qr_popup.wm_attributes("-transparentcolor")).lower() == transparent_color:
+                    popup_bg = transparent_color
+            except Exception:
+                popup_bg = "#FFFFFF"
+        self.qr_popup.configure(bg=popup_bg)
 
         box = ctk.CTkFrame(
             self.qr_popup,
             fg_color="#FFFFFF",
-            corner_radius=12,
+            corner_radius=13,
             border_width=1,
             border_color="#E5E7EB",
         )
@@ -864,7 +941,7 @@ class WikiVibeLink(ctk.CTkFrame):
             fg_color="transparent",
             font=(EN_FONT, 13, "bold"),
         )
-        label.pack(padx=10, pady=10)
+        label.pack(padx=12, pady=12)
 
         self.qr_popup.update_idletasks()
         popup_w = self.qr_popup.winfo_width()
@@ -954,7 +1031,7 @@ class Card(ctk.CTkFrame):
         step_action_width: int = 30,
         step_action_height: int = 30,
         fg_color: str = CARD,
-        corner_radius: int = 34,
+        corner_radius: int = 23,
         **kwargs,
     ):
         is_light = fg_color == SNOW
@@ -969,7 +1046,7 @@ class Card(ctk.CTkFrame):
         self.is_light = is_light
         self.grid_columnconfigure(0, weight=1)
 
-        header = ctk.CTkFrame(self, fg_color="transparent")
+        header = tk.Frame(self, bg=fg_color, highlightthickness=0, bd=0)
         header.grid(row=0, column=0, sticky="ew", padx=22, pady=(20, 10))
         header.grid_columnconfigure(3, weight=1)
 
@@ -1001,7 +1078,7 @@ class Card(ctk.CTkFrame):
                     text=step_action,
                     width=step_action_width,
                     height=step_action_height,
-                    corner_radius=max(step_action_width, step_action_height) // 2,
+                    corner_radius=max(8, max(step_action_width, step_action_height) // 3),
                     fg_color=step_action_fg,
                     hover_color=step_action_hover,
                     text_color=step_action_text_color,
@@ -1036,7 +1113,7 @@ class Card(ctk.CTkFrame):
                 tip_text_color=hint_tip_text_color or DARK,
             ).grid(row=0, column=4, sticky="e", padx=(10, 0))
 
-        self.body = ctk.CTkFrame(self, fg_color="transparent")
+        self.body = tk.Frame(self, bg=fg_color, highlightthickness=0, bd=0)
         self.body.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 22))
         self.body.grid_columnconfigure(0, weight=1)
 
@@ -1056,7 +1133,7 @@ class StatusChip(ctk.CTkLabel):
             text=f"{label}：待命",
             text_color=MUTED_ON_DARK,
             fg_color="#222020",
-            corner_radius=16,
+            corner_radius=12,
             font=(FONT, 12, "bold"),
             padx=12,
             pady=5,
@@ -1072,6 +1149,8 @@ class App(ctk.CTk):
         super().__init__()
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("green")
+        # Apply after loading the theme so dynamic dialogs inherit the same scale.
+        ctk.ThemeManager.theme["CTkScrollbar"]["corner_radius"] = 6
         load_local_fonts()
         self.apply_fonts()
         self.apply_logo()
@@ -1112,6 +1191,7 @@ class App(ctk.CTk):
         self.log("主版已啟動。內部核心以唯讀方式載入。", "success")
         if not _HAS_DND:
             self.log("拖放套件未載入；仍可使用「選擇檔案」。", "warn")
+        self.after(1400, self.check_for_updates_async)
 
     def apply_fonts(self):
         global FONT, EN_FONT
@@ -1193,7 +1273,7 @@ class App(ctk.CTk):
     def load_ui_assets(self):
         self.setting_step_icon = self.load_tk_png("_setting.png", (20, 20))
         self.bubble_tea_icon = self.load_tk_png("_Bubble-tea.png", (24, 24))
-        self.wikivibe_qr_image = self.load_tk_png("_portaly_wikivibe.png", (190, 190))
+        self.wikivibe_qr_image = self.load_tk_png("_portaly_wikivibe.png", (260, 260))
         self.fallback_setting_text = "⚙"
 
     def load_tk_png(self, name: str, size: tuple[int, int], invert: bool = False):
@@ -1217,6 +1297,32 @@ class App(ctk.CTk):
             return image
         except Exception:
             return None
+
+    def check_for_updates_async(self):
+        def worker():
+            try:
+                release = fetch_latest_release()
+                latest = str(release.get("tag_name") or "")
+                if is_newer_version(latest):
+                    self.after(0, lambda: self.show_update_notice(release))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def show_update_notice(self, release: dict):
+        latest = str(release.get("tag_name") or "").strip()
+        url = str(release.get("html_url") or GITHUB_RELEASES_URL)
+        should_open = messagebox.askyesno(
+            "發現新版本",
+            f"SanWich {latest} 已經發佈。\n\n"
+            f"目前版本：v{APP_VERSION}\n\n"
+            "更新不會重設授權時間，也不會覆寫 API 設定或個人化規則庫。\n"
+            "是否前往 GitHub 下載新版？",
+            parent=self,
+        )
+        if should_open:
+            webbrowser.open_new_tab(url)
 
     def build(self):
         self.grid_columnconfigure(0, weight=1)
@@ -1254,6 +1360,9 @@ class App(ctk.CTk):
         content.grid_columnconfigure(0, weight=5)
         content.grid_columnconfigure(1, weight=4)
         self.content_window = self.main_canvas.create_window((0, 0), window=content, anchor="nw")
+        self._main_canvas_width_job = None
+        self._pending_main_canvas_width = None
+        self._last_main_canvas_width = None
         content.bind("<Configure>", self._sync_main_scrollregion)
         self.main_canvas.bind("<Configure>", self._sync_main_canvas_width)
         self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
@@ -1270,8 +1379,33 @@ class App(ctk.CTk):
             self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
 
     def _sync_main_canvas_width(self, event):
-        if hasattr(self, "content_window"):
-            self.main_canvas.itemconfigure(self.content_window, width=event.width)
+        self._pending_main_canvas_width = max(1, int(event.width))
+
+        # First layout must be immediate; live resize events are coalesced so the
+        # entire two-column page is not reflowed for every single pixel.
+        if self._last_main_canvas_width is None:
+            self._apply_pending_main_canvas_width()
+            return
+
+        if self._main_canvas_width_job is not None:
+            try:
+                self.after_cancel(self._main_canvas_width_job)
+            except Exception:
+                pass
+        self._main_canvas_width_job = self.after(70, self._apply_pending_main_canvas_width)
+
+    def _apply_pending_main_canvas_width(self):
+        self._main_canvas_width_job = None
+        width = self._pending_main_canvas_width
+        if width is None or width == self._last_main_canvas_width:
+            return
+        if not hasattr(self, "content_window"):
+            return
+        try:
+            self.main_canvas.itemconfigure(self.content_window, width=width)
+        except tk.TclError:
+            return
+        self._last_main_canvas_width = width
 
     def _on_mousewheel(self, event):
         try:
@@ -1290,7 +1424,7 @@ class App(ctk.CTk):
             hint_tip_fg=SNOW,
             hint_tip_text_color=DARK,
             fg_color=CARD,
-            corner_radius=38,
+            corner_radius=26,
         )
         card.grid(row=0, column=0, sticky="nsew", padx=(0, 14), pady=(0, 14))
         ctk.CTkLabel(card.body, text="拖放音訊或影片", text_color=TEXT_ON_DARK, font=(FONT, 15, "bold"), anchor="w").grid(
@@ -1307,7 +1441,7 @@ class App(ctk.CTk):
             card.body,
             textvariable=self.input_path,
             height=46,
-            corner_radius=23,
+            corner_radius=16,
             fg_color=DARK_2,
             border_color=LINE,
             text_color=TEXT_ON_DARK,
@@ -1321,7 +1455,7 @@ class App(ctk.CTk):
             text="選擇檔案",
             width=164,
             height=50,
-            corner_radius=25,
+            corner_radius=18,
             fg_color=ORANGE,
             hover_color=ORANGE_DARK,
             text_color="#FFFFFF",
@@ -1340,13 +1474,13 @@ class App(ctk.CTk):
             hint_tip_fg=SNOW,
             hint_tip_text_color=DARK,
             fg_color=CARD,
-            corner_radius=34,
+            corner_radius=23,
         )
         card.grid(row=1, column=0, sticky="nsew", padx=(0, 14), pady=(0, 14))
         card.body.grid_columnconfigure(1, weight=1)
         self.output_option(card.body, 0, "SRT 字幕", "保留時間碼輸出路徑", self.srt_enabled, self.output_srt_path, self.choose_srt, self.open_srt_folder)
         self.output_option(card.body, 1, "純文字", "純文字輸出路徑", self.txt_enabled, self.output_txt_path, self.choose_txt, self.open_txt_folder)
-        diar_row = ctk.CTkFrame(card.body, fg_color="transparent")
+        diar_row = tk.Frame(card.body, bg=card.body.cget("bg"), highlightthickness=0, bd=0)
         diar_row.grid(row=2, column=0, columnspan=4, sticky="w", pady=(14, 0))
         ctk.CTkCheckBox(
             diar_row,
@@ -1355,7 +1489,7 @@ class App(ctk.CTk):
             command=self.on_diarize_toggle,
             fg_color=ORANGE, hover_color=ORANGE_DARK, checkmark_color="#FFFFFF",
             text_color=TEXT_ON_DARK, font=(FONT, 14, "bold"),
-            checkbox_width=24, checkbox_height=24, corner_radius=7, border_width=2,
+            checkbox_width=24, checkbox_height=24, corner_radius=5, border_width=2,
         ).pack(side="left")
         InfoBubble(
             diar_row,
@@ -1369,7 +1503,7 @@ class App(ctk.CTk):
         ctk.CTkOptionMenu(
             diar_row, values=["2 人", "3 人", "4 人", "5 人", "6 人"],
             variable=self.diar_speakers, command=lambda _v: self.persist_basic_config(),
-            width=92, height=30, corner_radius=15,
+            width=92, height=30, corner_radius=11,
             fg_color=DARK_2, button_color=ORANGE, button_hover_color=ORANGE_DARK,
             text_color=TEXT_ON_DARK, font=(FONT, 13), dropdown_fg_color=CARD, dropdown_text_color=TEXT_ON_DARK,
         ).pack(side="left")
@@ -1387,13 +1521,13 @@ class App(ctk.CTk):
             font=(FONT, 15, "bold"),
             checkbox_width=28,
             checkbox_height=28,
-            corner_radius=8,
+            corner_radius=6,
             border_width=2,
         ).grid(row=row, column=0, sticky="w", pady=(0, 16) if row == 0 else (0, 0))
         ctk.CTkEntry(
             parent,
             height=42,
-            corner_radius=21,
+            corner_radius=15,
             fg_color=DARK_2,
             border_color=LINE,
             text_color=TEXT_ON_DARK,
@@ -1407,7 +1541,7 @@ class App(ctk.CTk):
             text="另存為...",
             width=112,
             height=38,
-            corner_radius=19,
+            corner_radius=14,
             fg_color="#1a1919",
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -1419,7 +1553,7 @@ class App(ctk.CTk):
             text="開啟資料夾",
             width=112,
             height=38,
-            corner_radius=19,
+            corner_radius=14,
             fg_color="#1a1919",
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -1444,7 +1578,7 @@ class App(ctk.CTk):
             step_action_width=46,
             step_action_height=46,
             fg_color=CARD_DARK,
-            corner_radius=38,
+            corner_radius=26,
         )
         card.grid(row=0, column=1, rowspan=2, sticky="nsew", pady=(0, 14))
         card.body.grid_columnconfigure(0, weight=1)
@@ -1497,7 +1631,7 @@ class App(ctk.CTk):
         self.notes_box = ctk.CTkTextbox(
             card.body,
             height=182,
-            corner_radius=24,
+            corner_radius=17,
             fg_color=DARK_2,
             border_width=1,
             border_color=LINE,
@@ -1508,17 +1642,17 @@ class App(ctk.CTk):
         self.install_notes_placeholder()
 
     def action_card(self, parent):
-        card = ctk.CTkFrame(parent, fg_color=CARD_DARK, corner_radius=38, border_width=0, border_color="#0C0D12", height=214)
+        card = ctk.CTkFrame(parent, fg_color=CARD_DARK, corner_radius=26, border_width=0, border_color="#0C0D12", height=214)
         card.grid(row=2, column=0, sticky="nsew", padx=(0, 14), pady=(6, 14))
         card.grid_propagate(False)
         card.grid_columnconfigure(0, weight=1)
-        top = ctk.CTkFrame(card, fg_color="transparent")
+        top = tk.Frame(card, bg=CARD_DARK, highlightthickness=0, bd=0)
         top.grid(row=0, column=0, sticky="ew", padx=24, pady=(22, 8))
         top.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(top, text="4.", text_color=ORANGE, font=(EN_FONT, 22, "bold")).grid(
             row=0, column=0, sticky="w"
         )
-        chips = ctk.CTkFrame(top, fg_color="transparent")
+        chips = tk.Frame(top, bg=CARD_DARK, highlightthickness=0, bd=0)
         chips.grid(row=0, column=1, sticky="w", padx=(14, 0))
         self.breeze_chip = StatusChip(chips, "Breeze")
         self.breeze_chip.pack(side="left", padx=(0, 8))
@@ -1529,7 +1663,7 @@ class App(ctk.CTk):
             text="裝置：偵測中",
             text_color=MUTED_ON_DARK,
             fg_color="#222020",
-            corner_radius=16,
+            corner_radius=12,
             font=(FONT, 12, "bold"),
             padx=12,
             pady=5,
@@ -1559,17 +1693,17 @@ class App(ctk.CTk):
             text_color=MUTED_ON_DARK,
             font=(FONT, 13),
         ).grid(row=3, column=0, sticky="w", padx=24, pady=(0, 8))
-        self.progress = ctk.CTkProgressBar(card, height=18, corner_radius=9, progress_color=ORANGE, fg_color="#5E5654")
+        self.progress = ctk.CTkProgressBar(card, height=18, corner_radius=7, progress_color=ORANGE, fg_color="#5E5654")
         self.progress.grid(row=2, column=0, sticky="ew", padx=24, pady=(18, 12))
         self.progress.set(0)
-        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions = tk.Frame(card, bg=CARD_DARK, highlightthickness=0, bd=0)
         actions.grid(row=4, column=0, sticky="e", padx=24, pady=(0, 22))
         self.run_btn = ctk.CTkButton(
             actions,
             text="開始轉寫",
             width=164,
             height=54,
-            corner_radius=27,
+            corner_radius=19,
             fg_color=ORANGE,
             hover_color=TEAL_2,
             text_color="#FFFFFF",
@@ -1582,7 +1716,7 @@ class App(ctk.CTk):
             text="取消",
             width=98,
             height=44,
-            corner_radius=22,
+            corner_radius=15,
             fg_color="#32333B",
             hover_color="#45464F",
             text_color=MUTED_ON_DARK,
@@ -1599,7 +1733,7 @@ class App(ctk.CTk):
             step="5",
             hint="完成轉寫後可開啟字幕編輯器；AI 校對後可用快速對照核對修改或還原原始辨識。",
             fg_color=CARD_DARK,
-            corner_radius=34,
+            corner_radius=23,
             height=234,
         )
         card.grid(row=2, column=1, sticky="nsew", pady=(6, 14))
@@ -1612,14 +1746,14 @@ class App(ctk.CTk):
             anchor="w",
         )
         self.result_label.grid(row=0, column=0, sticky="w", pady=(0, 14))
-        row = ctk.CTkFrame(card.body, fg_color="transparent")
+        row = tk.Frame(card.body, bg=card.body.cget("bg"), highlightthickness=0, bd=0)
         row.grid(row=1, column=0, sticky="ew")
         self.srt_editor_btn = ctk.CTkButton(
             row,
             text="開啟字幕編輯器",
             width=152,
             height=40,
-            corner_radius=20,
+            corner_radius=14,
             fg_color=ORANGE,
             hover_color=ORANGE_DARK,
             text_color="#FFFFFF",
@@ -1633,7 +1767,7 @@ class App(ctk.CTk):
             text="快速對照",
             width=124,
             height=40,
-            corner_radius=20,
+            corner_radius=14,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -1649,13 +1783,13 @@ class App(ctk.CTk):
             "執行紀錄",
             hint="這裡顯示轉檔、辨識、AI 校對與儲存狀態。",
             fg_color=CARD,
-            corner_radius=34,
+            corner_radius=23,
         )
         card.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 14))
         self.log_box = ctk.CTkTextbox(
             card.body,
             height=190,
-            corner_radius=24,
+            corner_radius=17,
             fg_color=DARK_2,
             border_width=1,
             border_color="#0C0D12",
@@ -1864,7 +1998,7 @@ class App(ctk.CTk):
         win.transient(self)
         win.grab_set()
 
-        box = ctk.CTkFrame(win, fg_color=CARD, corner_radius=28, border_width=1, border_color=LINE)
+        box = ctk.CTkFrame(win, fg_color=CARD, corner_radius=19, border_width=1, border_color=LINE)
         box.pack(fill="both", expand=True, padx=20, pady=20)
         ctk.CTkLabel(
             box, text=f"🔒 {label}", text_color=TEXT_ON_DARK, font=(FONT, 22, "bold")
@@ -1887,12 +2021,12 @@ class App(ctk.CTk):
         btns = ctk.CTkFrame(box, fg_color="transparent")
         btns.pack(fill="x", padx=24, pady=(4, 22))
         ctk.CTkButton(
-            btns, text="支持開發", width=140, height=42, corner_radius=21,
+            btns, text="支持開發", width=140, height=42, corner_radius=15,
             fg_color=ORANGE, hover_color=ORANGE_DARK, font=(FONT, 14, "bold"),
             command=lambda: webbrowser.open_new_tab(WIKIVIBE_URL),
         ).pack(side="left")
         ctk.CTkButton(
-            btns, text="繼續使用 Free", width=140, height=42, corner_radius=21,
+            btns, text="繼續使用 Free", width=140, height=42, corner_radius=15,
             fg_color="#32333B", hover_color="#45464F", font=(FONT, 14),
             command=win.destroy,
         ).pack(side="left", padx=(12, 0))
@@ -1909,7 +2043,7 @@ class App(ctk.CTk):
         win.transient(self)
         win.grab_set()
 
-        outer = ctk.CTkScrollableFrame(win, fg_color=CARD, corner_radius=34, border_width=1, border_color=LINE)
+        outer = ctk.CTkScrollableFrame(win, fg_color=CARD, corner_radius=23, border_width=1, border_color=LINE)
         outer.pack(fill="both", expand=True, padx=24, pady=24)
         outer.grid_columnconfigure(0, weight=1)
 
@@ -1918,7 +2052,7 @@ class App(ctk.CTk):
         )
         ctk.CTkLabel(
             outer,
-            text="Key 只會儲存在本機 config.json；啟用 AI 校對時字幕文字會傳送到所選供應商。",
+            text="Key 儲存在 %APPDATA%\\SanWich\\config.json；更新不會覆寫。啟用 AI 校對時字幕文字會傳送到所選供應商。",
             text_color=MUTED_ON_DARK,
             font=(FONT, 13),
         ).grid(row=1, column=0, sticky="w", padx=24, pady=(0, 18))
@@ -1946,7 +2080,7 @@ class App(ctk.CTk):
             text="",
             text_color=MUTED_ON_DARK,
             fg_color=DARK_2,
-            corner_radius=18,
+            corner_radius=13,
             font=(FONT, 13),
             anchor="w",
             justify="left",
@@ -1970,7 +2104,7 @@ class App(ctk.CTk):
             dropdown_fg_color=DARK_2,
             dropdown_hover_color=GARNET,
             dropdown_text_color=TEXT_ON_DARK,
-            corner_radius=21,
+            corner_radius=15,
             height=42,
             anchor="w",
             dynamic_resizing=False,
@@ -1988,7 +2122,7 @@ class App(ctk.CTk):
             textvariable=key_var,
             show="●",
             height=42,
-            corner_radius=21,
+            corner_radius=15,
             fg_color=DARK_2,
             border_color=LINE,
             font=(EN_FONT, 13),
@@ -2012,7 +2146,7 @@ class App(ctk.CTk):
             outer,
             text="開啟申請頁",
             height=38,
-            corner_radius=19,
+            corner_radius=14,
             fg_color="#222020",
             hover_color="#2D2A2A",
             font=(FONT, 13),
@@ -2050,7 +2184,7 @@ class App(ctk.CTk):
             text=("個人化規則庫" if has_feature("custom_rules") else "個人化規則庫 🔒"),
             width=140,
             height=44,
-            corner_radius=22,
+            corner_radius=15,
             fg_color=DARK_2,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2062,7 +2196,7 @@ class App(ctk.CTk):
             text="儲存設定",
             width=140,
             height=44,
-            corner_radius=22,
+            corner_radius=15,
             fg_color=ORANGE,
             hover_color=TEAL_2,
             font=(FONT, 15, "bold"),
@@ -2073,7 +2207,7 @@ class App(ctk.CTk):
             text="關閉",
             width=100,
             height=44,
-            corner_radius=22,
+            corner_radius=15,
             fg_color="#32333B",
             hover_color="#45464F",
             font=(FONT, 14),
@@ -2081,7 +2215,7 @@ class App(ctk.CTk):
         ).grid(row=0, column=3, sticky="e")
 
         # ── Supporter 狀態與 Key ──────────────────────────────
-        supporter = ctk.CTkFrame(outer, fg_color=DARK_2, corner_radius=18)
+        supporter = ctk.CTkFrame(outer, fg_color=DARK_2, corner_radius=13)
         supporter.grid(row=10, column=0, sticky="ew", padx=24, pady=(0, 14))
         supporter.grid_columnconfigure(0, weight=1)
 
@@ -2107,9 +2241,9 @@ class App(ctk.CTk):
         sup_key_entry = ctk.CTkEntry(
             supporter,
             textvariable=sup_key_var,
-            placeholder_text="輸入 Supporter Key（SW-XXXX-XXXX-XXXX-XXXX）",
+            placeholder_text="貼上 Supporter Key",
             height=38,
-            corner_radius=19,
+            corner_radius=14,
             fg_color="#222020",
             border_color=LINE,
             font=(EN_FONT, 13),
@@ -2133,7 +2267,7 @@ class App(ctk.CTk):
             text="啟用 Key",
             width=110,
             height=38,
-            corner_radius=19,
+            corner_radius=14,
             fg_color=ORANGE,
             hover_color=ORANGE_DARK,
             font=(FONT, 13, "bold"),
@@ -2145,7 +2279,7 @@ class App(ctk.CTk):
         credits.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             credits,
-            text="v2.2",
+            text=f"v{APP_VERSION}",
             text_color=TEXT_ON_DARK,
             font=(EN_FONT, 12, "bold"),
         ).grid(row=0, column=0, sticky="w")
@@ -2319,6 +2453,9 @@ class App(ctk.CTk):
                 nc["timestamp"] = (st + offset, en + offset)
                 chunks.append(nc)
 
+        chunks, removed = CORE.suppress_repeat_hallucination(chunks)
+        if removed:
+            self.log(f"偵測到連續重複的幻覺字幕，已自動清除 {removed} 組。", "warn")
         return CORE.punctuate_chunks(chunks), "".join(texts)
 
     def process_one(self, inp: str, srt: str, txt: str, use_llm: bool, context_notes: str, use_text_fix: bool, diarize: bool = False):
@@ -2636,7 +2773,10 @@ class App(ctk.CTk):
             self.last_compare = compare_for_file
             before_chunks_for_review = compare_for_file.get("before_chunks") or []
             for i, (before, current) in enumerate(zip(before_chunks_for_review, original_chunks)):
-                if (before.get("text") or "").strip() != (current.get("text") or "").strip():
+                # 剝標點再比對：純標點差異（例如還原後少了逗號）不算 AI 修改
+                bt = CORE.strip_punct_for_srt((before.get("text") or "").strip())
+                at = CORE.strip_punct_for_srt((current.get("text") or "").strip())
+                if bt != at:
                     ai_review_indices.add(i)
 
         win = ctk.CTkToplevel(self)
@@ -2657,7 +2797,7 @@ class App(ctk.CTk):
         batch_count = len(getattr(self, "batch_results", []) or [])
         if batch_count > 1 and self.editor_index is not None:
             ctk.CTkButton(
-                head, text="＜", width=40, height=32, corner_radius=16,
+                head, text="＜", width=40, height=32, corner_radius=12,
                 fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
                 font=(EN_FONT, 16, "bold"), command=lambda: switch_file(-1),
             ).grid(row=0, column=0, sticky="w", padx=(0, 6))
@@ -2666,7 +2806,7 @@ class App(ctk.CTk):
                 text_color=MUTED_ON_DARK, font=(FONT, 12, "bold"),
             ).grid(row=0, column=1, sticky="w", padx=(0, 6))
             ctk.CTkButton(
-                head, text="＞", width=40, height=32, corner_radius=16,
+                head, text="＞", width=40, height=32, corner_radius=12,
                 fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
                 font=(EN_FONT, 16, "bold"), command=lambda: switch_file(1),
             ).grid(row=0, column=2, sticky="w", padx=(0, 14))
@@ -2760,7 +2900,7 @@ class App(ctk.CTk):
             text="ⓘ",
             width=30,
             height=28,
-            corner_radius=14,
+            corner_radius=10,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2769,7 +2909,7 @@ class App(ctk.CTk):
         )
         info_btn.grid(row=0, column=4, sticky="e", padx=(8, 0))
 
-        timeline_shell = ctk.CTkFrame(win, fg_color=CARD_DARK, corner_radius=20, border_width=1, border_color=LINE)
+        timeline_shell = ctk.CTkFrame(win, fg_color=CARD_DARK, corner_radius=14, border_width=1, border_color=LINE)
         timeline_shell.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 6))
         timeline_shell.grid_columnconfigure(0, weight=1)
         timeline_canvas = tk.Canvas(
@@ -2791,7 +2931,7 @@ class App(ctk.CTk):
             text="⏮",
             width=48,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2804,7 +2944,7 @@ class App(ctk.CTk):
             text="▶",
             width=58,
             height=38,
-            corner_radius=19,
+            corner_radius=14,
             fg_color=ORANGE,
             hover_color=ORANGE_DARK,
             text_color="#FFFFFF",
@@ -2817,7 +2957,7 @@ class App(ctk.CTk):
             text="⏭",
             width=48,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2830,7 +2970,7 @@ class App(ctk.CTk):
             text="✂",
             width=42,
             height=34,
-            corner_radius=17,
+            corner_radius=12,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2843,7 +2983,7 @@ class App(ctk.CTk):
             text="↶",
             width=38,
             height=34,
-            corner_radius=17,
+            corner_radius=12,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2856,7 +2996,7 @@ class App(ctk.CTk):
             text="↷",
             width=38,
             height=34,
-            corner_radius=17,
+            corner_radius=12,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2869,7 +3009,7 @@ class App(ctk.CTk):
             text="＋ 新增字幕",
             width=112,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color="#243A2E",
             hover_color="#2F5140",
             text_color=TEXT_ON_DARK,
@@ -2882,7 +3022,7 @@ class App(ctk.CTk):
             text="⇄ 合併",
             width=92,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2895,7 +3035,7 @@ class App(ctk.CTk):
             text="🔎 取代",
             width=92,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -2908,7 +3048,7 @@ class App(ctk.CTk):
             text="刪除",
             width=78,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color="#3A2022",
             hover_color="#5A2B2F",
             text_color=TEXT_ON_DARK,
@@ -2931,7 +3071,7 @@ class App(ctk.CTk):
         timeline_scroll.grid(row=2, column=0, sticky="ew", padx=14, pady=(6, 8))
         timeline_canvas.configure(xscrollcommand=timeline_scroll.set)
 
-        table_shell = ctk.CTkFrame(win, fg_color=CARD_DARK, corner_radius=24, border_width=1, border_color=LINE, height=200)
+        table_shell = ctk.CTkFrame(win, fg_color=CARD_DARK, corner_radius=17, border_width=1, border_color=LINE, height=200)
         table_shell.grid(row=3, column=0, sticky="nsew", padx=24, pady=(0, 8))
         table_shell.grid_columnconfigure(0, weight=1)
         table_shell.grid_rowconfigure(1, weight=1)
@@ -2961,7 +3101,7 @@ class App(ctk.CTk):
         for col, weight in ((0, 0), (1, 0), (2, 0), (3, 1)):
             body.grid_columnconfigure(col, weight=weight)
         try:
-            body._scrollbar.configure(width=16, corner_radius=8, button_color="#2C2222", button_hover_color=ORANGE_DARK)
+            body._scrollbar.configure(width=16, corner_radius=6, button_color="#2C2222", button_hover_color=ORANGE_DARK)
         except Exception:
             pass
 
@@ -4165,7 +4305,7 @@ class App(ctk.CTk):
             dialog.grab_set()
             dialog.grid_columnconfigure(0, weight=1)
 
-            box = ctk.CTkFrame(dialog, fg_color=CARD_DARK, corner_radius=20, border_width=1, border_color=LINE)
+            box = ctk.CTkFrame(dialog, fg_color=CARD_DARK, corner_radius=14, border_width=1, border_color=LINE)
             box.grid(row=0, column=0, sticky="nsew", padx=18, pady=18)
             box.grid_columnconfigure(1, weight=1)
             find_var = ctk.StringVar(value="")
@@ -4232,11 +4372,11 @@ class App(ctk.CTk):
 
             actions = ctk.CTkFrame(box, fg_color="transparent")
             actions.grid(row=3, column=0, columnspan=2, sticky="e", padx=16, pady=(14, 16))
-            ctk.CTkButton(actions, text="下一個", width=92, height=36, corner_radius=18, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=find_next).pack(side="left", padx=(0, 8))
+            ctk.CTkButton(actions, text="下一個", width=92, height=36, corner_radius=13, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=find_next).pack(side="left", padx=(0, 8))
             if replace_mode:
-                ctk.CTkButton(actions, text="取代", width=84, height=36, corner_radius=18, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=replace_current).pack(side="left", padx=(0, 8))
-                ctk.CTkButton(actions, text="全部取代", width=110, height=36, corner_radius=18, fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF", font=(FONT, 13, "bold"), command=replace_all).pack(side="left", padx=(0, 8))
-            ctk.CTkButton(actions, text="關閉", width=84, height=36, corner_radius=18, fg_color="#32333B", hover_color="#45464F", text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=dialog.destroy).pack(side="left")
+                ctk.CTkButton(actions, text="取代", width=84, height=36, corner_radius=13, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=replace_current).pack(side="left", padx=(0, 8))
+                ctk.CTkButton(actions, text="全部取代", width=110, height=36, corner_radius=13, fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF", font=(FONT, 13, "bold"), command=replace_all).pack(side="left", padx=(0, 8))
+            ctk.CTkButton(actions, text="關閉", width=84, height=36, corner_radius=13, fg_color="#32333B", hover_color="#45464F", text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=dialog.destroy).pack(side="left")
             find_entry.focus_set()
 
         def create_caption_row(chunk: dict) -> dict:
@@ -4585,7 +4725,7 @@ class App(ctk.CTk):
             if PERSONAL_RULES is None:
                 return
             try:
-                rules_path = here() / "core" / "personal_rules.json"
+                rules_path = PERSONAL_RULES_PATH
                 history_path = here() / "logs" / "srt_edit_history.jsonl"
                 store = PERSONAL_RULES.RuleStore(rules_path)
                 edits = PERSONAL_RULES.iter_edits_for_input(
@@ -4674,7 +4814,7 @@ class App(ctk.CTk):
             text="⤓ 匯入",
             width=112,
             height=42,
-            corner_radius=21,
+            corner_radius=15,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -4686,7 +4826,7 @@ class App(ctk.CTk):
             text="檢查時間軸",
             width=128,
             height=42,
-            corner_radius=21,
+            corner_radius=15,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -4698,7 +4838,7 @@ class App(ctk.CTk):
             text="另存 TXT",
             width=112,
             height=42,
-            corner_radius=21,
+            corner_radius=15,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -4710,7 +4850,7 @@ class App(ctk.CTk):
             text="另存 SRT",
             width=112,
             height=42,
-            corner_radius=21,
+            corner_radius=15,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -4722,7 +4862,7 @@ class App(ctk.CTk):
             text="儲存修改",
             width=124,
             height=42,
-            corner_radius=21,
+            corner_radius=15,
             fg_color=ORANGE,
             hover_color=ORANGE_DARK,
             text_color="#FFFFFF",
@@ -4734,7 +4874,7 @@ class App(ctk.CTk):
             text="關閉",
             width=94,
             height=42,
-            corner_radius=21,
+            corner_radius=15,
             fg_color="#32333B",
             hover_color="#45464F",
             text_color=TEXT_ON_DARK,
@@ -4751,7 +4891,7 @@ class App(ctk.CTk):
         if PERSONAL_RULES is None:
             messagebox.showinfo("規則庫無法開啟", "找不到 core/personal_rules.py，請確認檔案完整。")
             return
-        rules_path = here() / "core" / "personal_rules.json"
+        rules_path = PERSONAL_RULES_PATH
         try:
             store = PERSONAL_RULES.RuleStore(rules_path)
         except Exception as exc:
@@ -4849,7 +4989,7 @@ class App(ctk.CTk):
         body = ctk.CTkScrollableFrame(
             win,
             fg_color=CARD_DARK,
-            corner_radius=18,
+            corner_radius=13,
             scrollbar_button_color=DARK,
             scrollbar_button_hover_color=ORANGE_DARK,
         )
@@ -5004,7 +5144,7 @@ class App(ctk.CTk):
                     text="解凍" if is_frozen else "冷凍",
                     width=58,
                     height=30,
-                    corner_radius=15,
+                    corner_radius=11,
                     fg_color=DARK,
                     hover_color=GARNET,
                     text_color=TEXT_ON_DARK,
@@ -5017,7 +5157,7 @@ class App(ctk.CTk):
                     text="刪除",
                     width=58,
                     height=30,
-                    corner_radius=15,
+                    corner_radius=11,
                     fg_color="#3A2022",
                     hover_color="#5A2B2F",
                     text_color=TEXT_ON_DARK,
@@ -5077,17 +5217,17 @@ class App(ctk.CTk):
                 messagebox.showerror("無法開啟資料夾", str(exc))
 
         ctk.CTkButton(
-            foot, text="全部啟用", width=98, height=36, corner_radius=18,
+            foot, text="全部啟用", width=98, height=36, corner_radius=13,
             fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
             font=(FONT, 13, "bold"), command=on_enable_all,
         ).grid(row=0, column=0, sticky="w", padx=(0, 6))
         ctk.CTkButton(
-            foot, text="全部停用", width=98, height=36, corner_radius=18,
+            foot, text="全部停用", width=98, height=36, corner_radius=13,
             fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
             font=(FONT, 13, "bold"), command=on_disable_all,
         ).grid(row=0, column=1, sticky="w", padx=(0, 6))
         ctk.CTkButton(
-            foot, text="開啟資料夾", width=110, height=36, corner_radius=18,
+            foot, text="開啟資料夾", width=110, height=36, corner_radius=13,
             fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
             font=(FONT, 13, "bold"), command=on_open_folder,
         ).grid(row=0, column=2, sticky="w", padx=(0, 6))
@@ -5123,12 +5263,12 @@ class App(ctk.CTk):
             )
 
         ctk.CTkButton(
-            foot, text="整理規則庫", width=122, height=36, corner_radius=18,
+            foot, text="整理規則庫", width=122, height=36, corner_radius=13,
             fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF",
             font=(FONT, 13, "bold"), command=on_cleanup,
         ).grid(row=0, column=3, sticky="w", padx=(0, 6))
         ctk.CTkButton(
-            foot, text="關閉", width=86, height=36, corner_radius=18,
+            foot, text="關閉", width=86, height=36, corner_radius=13,
             fg_color="#32333B", hover_color="#45464F", text_color=TEXT_ON_DARK,
             font=(FONT, 13, "bold"), command=win.destroy,
         ).grid(row=0, column=4, sticky="e")
@@ -5177,7 +5317,7 @@ class App(ctk.CTk):
         body = ctk.CTkScrollableFrame(
             dialog,
             fg_color=CARD_DARK,
-            corner_radius=18,
+            corner_radius=13,
             scrollbar_button_color=DARK,
             scrollbar_button_hover_color=ORANGE_DARK,
         )
@@ -5264,7 +5404,7 @@ class App(ctk.CTk):
             text="全選",
             width=70,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -5276,7 +5416,7 @@ class App(ctk.CTk):
             text="全不選",
             width=78,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color=DARK,
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
@@ -5315,7 +5455,7 @@ class App(ctk.CTk):
             text="取消",
             width=86,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color="#32333B",
             hover_color="#45464F",
             text_color=TEXT_ON_DARK,
@@ -5327,7 +5467,7 @@ class App(ctk.CTk):
             text="加入規則庫",
             width=128,
             height=36,
-            corner_radius=18,
+            corner_radius=13,
             fg_color=ORANGE,
             hover_color=ORANGE_DARK,
             text_color="#FFFFFF",
@@ -5362,7 +5502,8 @@ class App(ctk.CTk):
         for i, (b, a) in enumerate(zip(before, after), start=1):
             bt = (b.get("text") or "").strip()
             at = (a.get("text") or "").strip()
-            if bt != at:
+            # 只改標點的行不列入對照（SRT 輸出前標點會全部移除，對字幕無影響）
+            if CORE.strip_punct_for_srt(bt) != CORE.strip_punct_for_srt(at):
                 ts = b.get("timestamp") or (b.get("start", 0.0), b.get("end", 0.0))
                 start = CORE.format_timestamp(ts[0] if ts[0] is not None else 0.0)
                 end = CORE.format_timestamp(ts[1] if ts[1] is not None else 0.0)
@@ -5401,7 +5542,8 @@ class App(ctk.CTk):
 
         wrote = 0
         if data.get("srt"):
-            Path(data["srt"]).write_text(CORE.chunks_to_srt_string(after_chunks), encoding="utf-8-sig")
+            # 用正規版 chunks_to_srt（剝標點＋自動換行），與第一版 SRT 行為一致
+            Path(data["srt"]).write_text(CORE.chunks_to_srt(after_chunks), encoding="utf-8-sig")
             wrote += 1
         if data.get("txt"):
             Path(data["txt"]).write_text(after_text + "\n", encoding="utf-8-sig")
@@ -5464,7 +5606,7 @@ class App(ctk.CTk):
         )
         summary_label.grid(row=0, column=1, sticky="e")
 
-        review = ctk.CTkFrame(win, fg_color=AI_REVIEW_BG, corner_radius=20, border_width=1, border_color=AI_REVIEW_BORDER)
+        review = ctk.CTkFrame(win, fg_color=AI_REVIEW_BG, corner_radius=14, border_width=1, border_color=AI_REVIEW_BORDER)
         review.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 12))
         review.grid_columnconfigure(0, weight=1)
         review_status = ctk.StringVar(value="")
@@ -5478,7 +5620,7 @@ class App(ctk.CTk):
         original_box = ctk.CTkTextbox(
             review,
             height=72,
-            corner_radius=14,
+            corner_radius=10,
             fg_color=DARK_2,
             border_width=1,
             border_color=LINE,
@@ -5490,7 +5632,7 @@ class App(ctk.CTk):
         corrected_box = ctk.CTkTextbox(
             review,
             height=78,
-            corner_radius=14,
+            corner_radius=10,
             fg_color=DARK_2,
             border_width=1,
             border_color=AI_REVIEW_BORDER,
@@ -5571,7 +5713,7 @@ class App(ctk.CTk):
                 )
                 return
             for row, (idx, timecode, before, after) in enumerate(now_diffs):
-                item = ctk.CTkFrame(body, fg_color=DARK_2, corner_radius=18, border_width=1, border_color=AI_REVIEW_BORDER)
+                item = ctk.CTkFrame(body, fg_color=DARK_2, corner_radius=13, border_width=1, border_color=AI_REVIEW_BORDER)
                 item.grid(row=row, column=0, sticky="ew", pady=(0, 10))
                 item.grid_columnconfigure(0, weight=1)
                 ctk.CTkLabel(item, text=f"{idx}. {timecode}", text_color=AI_REVIEW, font=(EN_FONT, 12, "bold")).grid(
@@ -5615,7 +5757,8 @@ class App(ctk.CTk):
             before_chunks = data.get("before_chunks") or []
             after_chunks = data.get("after_chunks") or []
             if 0 <= idx < len(before_chunks) and 0 <= idx < len(after_chunks):
-                after_chunks[idx]["text"] = chunk_text(before_chunks, idx)
+                # 還原時直接剝標點，讓還原結果與 SRT 輸出一致（無標點）
+                after_chunks[idx]["text"] = CORE.strip_punct_for_srt(chunk_text(before_chunks, idx))
                 self.persist_compare_after_chunks()
                 reviewed.add(idx)
                 review_pos["value"] += 1
@@ -5631,16 +5774,16 @@ class App(ctk.CTk):
             review_pos["value"] += 1
             load_review_item()
 
-        ctk.CTkButton(review, text="播放片段", width=104, height=38, corner_radius=19, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=play_current).grid(
+        ctk.CTkButton(review, text="播放片段", width=104, height=38, corner_radius=14, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=play_current).grid(
             row=3, column=0, sticky="w", padx=(16, 8), pady=(0, 14)
         )
-        ctk.CTkButton(review, text="還原並下一個", width=124, height=38, corner_radius=19, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=restore_current).grid(
+        ctk.CTkButton(review, text="還原並下一個", width=124, height=38, corner_radius=14, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=restore_current).grid(
             row=3, column=1, sticky="w", padx=(0, 8), pady=(0, 14)
         )
-        ctk.CTkButton(review, text="略過", width=84, height=38, corner_radius=19, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=skip_current).grid(
+        ctk.CTkButton(review, text="略過", width=84, height=38, corner_radius=14, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=skip_current).grid(
             row=3, column=2, sticky="w", padx=(0, 8), pady=(0, 14)
         )
-        ctk.CTkButton(review, text="接受並下一個", width=128, height=38, corner_radius=19, fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF", font=(FONT, 13, "bold"), command=accept_current).grid(
+        ctk.CTkButton(review, text="接受並下一個", width=128, height=38, corner_radius=14, fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF", font=(FONT, 13, "bold"), command=accept_current).grid(
             row=3, column=3, sticky="e", padx=(0, 16), pady=(0, 14)
         )
 
@@ -5653,7 +5796,7 @@ class App(ctk.CTk):
         body.grid(row=2, column=0, sticky="nsew", padx=24, pady=(0, 12))
         body.grid_columnconfigure(0, weight=1)
         try:
-            body._scrollbar.configure(width=16, corner_radius=8, button_color="#2C2222", button_hover_color=ORANGE_DARK)
+            body._scrollbar.configure(width=16, corner_radius=6, button_color="#2C2222", button_hover_color=ORANGE_DARK)
         except Exception:
             pass
         render_diff_list()
@@ -5663,15 +5806,15 @@ class App(ctk.CTk):
         foot.grid(row=3, column=0, sticky="ew", padx=24, pady=(0, 20))
         foot.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkButton(foot, text="關閉", width=100, height=40, corner_radius=20, fg_color="#32333B", hover_color="#45464F", text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=win.destroy).grid(row=0, column=3, sticky="e")
-        ctk.CTkButton(foot, text="複製全部對照", width=144, height=40, corner_radius=20, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=self.copy_comparison).grid(
+        ctk.CTkButton(foot, text="關閉", width=100, height=40, corner_radius=14, fg_color="#32333B", hover_color="#45464F", text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=win.destroy).grid(row=0, column=3, sticky="e")
+        ctk.CTkButton(foot, text="複製全部對照", width=144, height=40, corner_radius=14, fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=self.copy_comparison).grid(
             row=0, column=2, sticky="e", padx=(0, 8)
         )
-        ctk.CTkButton(foot, text="另存對照 .txt", width=148, height=40, corner_radius=20, fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF", font=(FONT, 13, "bold"), command=self.save_comparison_txt).grid(
+        ctk.CTkButton(foot, text="另存對照 .txt", width=148, height=40, corner_radius=14, fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF", font=(FONT, 13, "bold"), command=self.save_comparison_txt).grid(
             row=0, column=1, sticky="e", padx=(0, 8)
         )
         # 不滿意 AI 改太多時，可直接把輸出還原回語音模型的原始辨識
-        ctk.CTkButton(foot, text="↩ 還原原始辨識", width=168, height=40, corner_radius=20, fg_color="#3A2A22", hover_color="#5A3B2F", text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=self.restore_original).grid(
+        ctk.CTkButton(foot, text="↩ 還原原始辨識", width=168, height=40, corner_radius=14, fg_color="#3A2A22", hover_color="#5A3B2F", text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=self.restore_original).grid(
             row=0, column=0, sticky="w"
         )
 
@@ -5740,7 +5883,8 @@ class App(ctk.CTk):
         data = self.last_compare
         count = 0
         if data.get("srt"):
-            Path(data["srt"]).write_text(CORE.chunks_to_srt_string(data["before_chunks"]), encoding="utf-8-sig")
+            # 用正規版 chunks_to_srt（剝標點＋自動換行），與第一版 SRT 行為一致
+            Path(data["srt"]).write_text(CORE.chunks_to_srt(data["before_chunks"]), encoding="utf-8-sig")
             count += 1
         if data.get("txt"):
             Path(data["txt"]).write_text((data.get("before_text") or "") + "\n", encoding="utf-8-sig")
@@ -5749,6 +5893,7 @@ class App(ctk.CTk):
         messagebox.showinfo("已還原", f"已還原 {count} 個輸出檔案。")
 
 
+# 2026-07-10：還原寫檔改用 chunks_to_srt（剝標點＋換行）、新增連續重複幻覺過濾
 if __name__ == "__main__":
     enable_dpi_awareness()
     set_app_user_model_id()

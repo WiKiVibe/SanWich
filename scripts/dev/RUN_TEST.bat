@@ -10,7 +10,7 @@ if not exist "%PY%" (
 )
 
 set "APP="
-for %%F in ("%~dp0*SanWich*.py") do set "APP=%%~fF"
+for %%F in ("%CD%\*SanWich*.py") do set "APP=%%~fF"
 if not defined APP (
   echo [ERROR] main app *SanWich*.py not found.
   pause

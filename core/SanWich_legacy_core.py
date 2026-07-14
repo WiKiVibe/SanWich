@@ -6,8 +6,10 @@ Breeze-ASR-25 語音轉文字 + AI 總編輯校對
 
 import datetime
 import ctypes
+import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,9 +33,11 @@ except Exception:
 
 try:
     import jieba
+    import jieba.posseg as jieba_posseg
     _HAS_JIEBA = True
 except Exception:
     jieba = None
+    jieba_posseg = None
     _HAS_JIEBA = False
 
 # ── 模型 ID ──────────────────────────────────────────────
@@ -77,25 +81,12 @@ EDITOR_SYSTEM_PROMPT = (
     "4. 嚴禁把逐字稿改寫成精簡摘要；不得自行濃縮、合併重點、刪掉細節、改變說話者語氣或新增原文沒有的內容。\n"
     "5. 儘量維持原字幕字數與資訊量。除了明顯錯字、斷句、專有名詞與無意義贅詞外，不要大幅縮短句子。\n"
     "6. 數字統一為阿拉伯數字（二零二六→2026）。英文專有名詞統一常用大小寫（AI、API、DaVinci）。人稱指人類用「他」，指非人類（軟體、摩托車、系統）一律用「它」。\n"
-    "7. 【「或是」強制跨組搬移】：當某組字幕的結尾是「或是」時，請將「或是」搬移至下一組字幕的開頭。此為合法的文字流動，請安心執行。\n"
-    "   例如輸入：\n"
-    "   1\n"
-    "   00:00:01,000 --> 00:00:03,000\n"
-    "   你們的命運將交給老闆或是\n\n"
-    "   2\n"
-    "   00:00:03,500 --> 00:00:05,000\n"
-    "   客人來決定\n\n"
-    "   處理後應輸出：\n"
-    "   1\n"
-    "   00:00:01,000 --> 00:00:03,000\n"
-    "   你們的命運將交給老闆\n\n"
-    "   2\n"
-    "   00:00:03,500 --> 00:00:05,000\n"
-    "   或是客人來決定\n\n"
+    "7. 【中文語意斷句】請先理解整個子句，再決定跨組搬字；不要把每個詞當成獨立規則。修飾語與中心詞、介詞與受詞、連接詞與後接子句、否定／程度副詞與謂語、姓名與稱謂、數字與單位、完整英文詞組必須盡量留在同一組。優先在完整語意單位之後，或在下一個轉折／承接子句之前換組；避免把『因為、所以、但是、然後、或是、如果、把、被、的、很』這類尚未完成語意的成分孤零零留在行尾。\n"
+    "8. 【中英數空格】中文與單一英文詞、縮寫、阿拉伯數字相鄰時不加空格（如『聊Podcast』『使用Threads』『澳幣7.99』）；英文片語內原有的單字空格要保留。小數、日期、時間、版本號、數字範圍內不得插入空格；只有兩個獨立數值並列且沒有標點可用時，才用一個空格避免黏成另一個數字。\n"
+    "9. 專有名詞請依照台灣官方或常用譯名，或依照官方網站、新聞媒體、維基百科等可靠來源為準。\n"
+    "10. 每組字幕一行不超過15個中文字寬；需要跨組重排時，以語意完整優先於左右字數完全平均。輸出不要加入一般標點，但數字內的小數點、日期／時間分隔、版本號與範圍符號必須保留。\n"
+    "11. 請主動將中國大陸用語改為台灣慣用語，例如『視頻→影片』『軟件→軟體』『信息→資訊／訊息』『鼠標→滑鼠』『打印→列印』『外賣→外送』『快遞→宅配』『公交→公車』『地鐵→捷運』『出租車→計程車』『酒店→飯店』『質量→品質』。請依上下文判斷，不要機械式替換，並避免不符合台灣語感的句式。\n\n"
     "輸出格式：直接輸出校對完成後的標準 SRT 內容，嚴禁添加任何額外的解釋與說明。"
-    "8. 專有名詞請依照台灣官方或常用譯名，或依照官方網站、新聞媒體、維基百科等可靠來源為準。"
-    "9. 請保留原 SRT 的換行格式，一行不超過13個中文字元，沒有標點符號，若超過則自動換行。"
-    "10.請主動將中國大陸用語改為台灣慣用語，例如「視頻→影片」「軟件→軟體」「信息→資訊／訊息」「鼠標→滑鼠」「打印→列印」「外賣→外送」「快遞→宅配」「公交→公車」「地鐵→捷運」「出租車→計程車」「酒店→飯店」「質量→品質」。請依上下文判斷，不要機械式替換，並避免不符合台灣語感的句式。"
 )
 
 # ── 文字修正 Prompt（可在設定中開關）────────────────────────
@@ -353,9 +344,49 @@ def _build_srt_punct():
 
 _SRT_PUNCT_RE = _build_srt_punct()
 
+
+_NUMERIC_JOIN_RE = re.compile(r"(?<=\d)[.,:/-](?=\d)")
+_PARALLEL_NUMBER_LEFT_RE = re.compile(r"\d+(?:\.\d+)?(?:年|月|日|號|點|時|分|秒|元|塊|萬|億|%|％)$")
+
+
+def normalize_subtitle_spacing(text: str) -> str:
+    """統一中英數空格，但保留英文片語與無標點數字列舉的必要分隔。"""
+    text = re.sub(r"[\t\u3000 ]+", " ", (text or "").strip())
+    if " " not in text:
+        return text
+    parts = text.split(" ")
+    out = parts[0]
+    for part in parts[1:]:
+        if not part:
+            continue
+        left = out[-1:] if out else ""
+        right = part[:1]
+        keep_space = bool(left and right and left.isascii() and left.isalpha() and right.isascii() and right.isalpha())
+        # 「6 7年」與「6月 7月」在無標點字幕中代表兩個獨立數值，不能黏成 67。
+        if left.isdigit() and right.isdigit():
+            keep_space = True
+        if right.isdigit() and _PARALLEL_NUMBER_LEFT_RE.search(out):
+            keep_space = True
+        if keep_space:
+            out += " " + part
+        else:
+            out += part
+    return out
+
+
 def strip_punct_for_srt(text: str) -> str:
-    """移除 SRT 字幕文字中所有標點符號，保留文字、數字、英文與空格。"""
-    return _SRT_PUNCT_RE.sub("", text).strip()
+    """移除一般標點；保留 7.99、1,000、12:30、2.3.1、6-7 等數字結構。"""
+    protected: list[str] = []
+
+    def protect_numeric(match: re.Match) -> str:
+        protected.append(match.group(0))
+        return f"\ue000{len(protected) - 1}\ue001"
+
+    value = _NUMERIC_JOIN_RE.sub(protect_numeric, text or "")
+    value = _SRT_PUNCT_RE.sub("", value)
+    for idx, token in enumerate(protected):
+        value = value.replace(f"\ue000{idx}\ue001", token)
+    return normalize_subtitle_spacing(value)
 
 
 def srt_char_width(ch: str) -> float:
@@ -385,8 +416,42 @@ def _hard_split_token(token: str, max_width: float) -> list[str]:
     return parts
 
 
+_CLAUSE_STARTERS = (
+    "因為", "所以", "但是", "可是", "不過", "然而", "然後", "而且", "如果", "假如",
+    "雖然", "其實", "另外", "接著", "結果", "至於", "就是", "還有", "或是", "以及",
+)
+_CLAUSE_TAKING_VERBS = ("覺得", "認為", "以為", "知道", "發現", "希望", "相信", "聽說", "看到", "想說")
+_BOUND_LEFT = set("的地得把被跟與和或在從對向為讓將就才也都還很最更沒不再正")
+_WEAK_LEFT_POS = {"p", "c", "d", "uj", "uv", "ul", "uz", "m", "q"}
+_WEAK_RIGHT_POS = {"p", "uj", "uv", "ul", "uz", "y"}
+
+
+def _boundary_linguistic_cost(left: str, right: str, left_pos: str = "", right_pos: str = "") -> float:
+    """越低越適合斷句；用詞性與句法類別評分，不依賴單一詞的硬規則。"""
+    score = 0.0
+    if not left or not right:
+        return 999.0
+    if left[-1] in _BOUND_LEFT or left_pos in _WEAK_LEFT_POS:
+        score += 18.0
+    if right_pos in _WEAK_RIGHT_POS:
+        score += 18.0
+    if right.startswith(("很", "最", "更", "非常", "太", "不", "沒")):
+        score += 14.0
+    if right_pos == "c" or right.startswith(_CLAUSE_STARTERS):
+        score -= 16.0
+    if left.endswith(_CLAUSE_TAKING_VERBS) and right_pos[:1] in {"m", "n", "r"}:
+        score -= 22.0
+    if left_pos[:1] == "n" and right_pos[:1] == "n":
+        score += 10.0
+    if left.endswith(("呢", "嗎", "吧", "啦", "啊", "喔", "耶")):
+        score -= 8.0
+    if left[-1:].isascii() and right[:1].isascii() and left[-1:].isalnum() and right[:1].isalnum():
+        score += 50.0
+    return score
+
+
 def _balanced_split(tokens: list[str], max_width: float,
-                    min_tail: float = 4.0) -> list[str]:
+                    min_tail: float = 4.0, pos_tags: list[str] | None = None) -> list[str]:
     """在詞界中找最佳切點，遞迴切到每行都不超寬。
     評分：越平衡越好；斷在空格（自然停頓）大加分；產生過短行大扣分。"""
     text = "".join(tokens).strip()
@@ -404,31 +469,49 @@ def _balanced_split(tokens: list[str], max_width: float,
             continue
         wl = srt_text_width(left)
         wr = srt_text_width(right)
-        score = abs(wl - wr)                      # 兩邊越平均越好
+        score = abs(wl - wr) * 1.4                # 平衡仍重要，但不凌駕語意完整
         if tokens[i - 1].isspace() or tokens[i].isspace():
             score -= 8.0                          # 優先斷在空格（自然停頓）
         if wl < min_tail or wr < min_tail:
             score += 100.0                        # 避免「人」「知道」這種孤兒行
+        left_pos = pos_tags[i - 1] if pos_tags and i - 1 < len(pos_tags) else ""
+        right_pos = pos_tags[i] if pos_tags and i < len(pos_tags) else ""
+        score += _boundary_linguistic_cost(left, right, left_pos, right_pos)
+        # 對偶／排比的動賓節奏要成組，例如「見神殺神｜見佛殺佛」。
+        if pos_tags and i >= 4 and i + 4 <= len(pos_tags):
+            left_pattern = [tag[:1] for tag in pos_tags[i - 4 : i]]
+            right_pattern = [tag[:1] for tag in pos_tags[i : i + 4]]
+            if left_pattern == right_pattern and left_pattern in (["v", "n", "v", "n"], ["a", "n", "a", "n"]):
+                score -= 12.0
         if best_score is None or score < best_score:
             best_i, best_score = i, score
 
     if best_i is None:
         return _hard_split_token(text, max_width)
-    return (_balanced_split(tokens[:best_i], max_width, min_tail)
-            + _balanced_split(tokens[best_i:], max_width, min_tail))
+    left_tags = pos_tags[:best_i] if pos_tags else None
+    right_tags = pos_tags[best_i:] if pos_tags else None
+    return (_balanced_split(tokens[:best_i], max_width, min_tail, left_tags)
+            + _balanced_split(tokens[best_i:], max_width, min_tail, right_tags))
 
 
 def wrap_srt_text(text: str, max_width: float = SRT_MAX_LINE_WIDTH) -> list[str]:
     """超寬時不再貪婪塞滿：優先斷在空格，其次在 jieba 詞界找最平衡的切點，
     並避免產生過短的孤兒行。未安裝 jieba 時退回逐字為單位做平衡切分。"""
-    text = text.replace("\r", "").replace("\n", "").strip()
+    text = normalize_subtitle_spacing(text.replace("\r", "").replace("\n", ""))
     if not text:
         return []
     if srt_text_width(text) <= max_width:
         return [text]
 
+    pos_tags = None
     if _HAS_JIEBA:
-        tokens = [w for w in jieba.cut(text) if w]
+        # 這些是中文子句銜接類別，不是針對個案逐條替換；提高詞典頻率可避免
+        # 「閒聊然｜後」這種先被 jieba 切壞、後面再也救不回來的邊界。
+        for marker in _CLAUSE_STARTERS:
+            jieba.add_word(marker, freq=200000, tag="c")
+        pairs = [(item.word, item.flag) for item in jieba_posseg.cut(text) if item.word]
+        tokens = [word for word, _flag in pairs]
+        pos_tags = [flag for _word, flag in pairs]
     else:
         tokens = list(text)
 
@@ -440,7 +523,9 @@ def wrap_srt_text(text: str, max_width: float = SRT_MAX_LINE_WIDTH) -> list[str]
         else:
             fixed.append(w)
 
-    lines = [ln.strip() for ln in _balanced_split(fixed, max_width)]
+    if pos_tags is not None and len(fixed) != len(pos_tags):
+        pos_tags = None
+    lines = [ln.strip() for ln in _balanced_split(fixed, max_width, pos_tags=pos_tags)]
     return [ln for ln in lines if ln] or [text]
 
 
@@ -493,6 +578,56 @@ def chunks_to_srt(chunks: list[dict]) -> str:
                 current_start = line_end
 
     return "\n".join(entries).strip() + "\n"
+
+
+def normalize_chunk_timeline(chunks: list[dict], min_duration: float = 0.04) -> tuple[list[dict], int]:
+    """把模型分批邊界夾回單調時間軸，避免前一批尾端超出下一批起點。"""
+    normalized: list[dict] = []
+    adjusted = 0
+    previous_end = 0.0
+    for chunk in chunks:
+        item = dict(chunk)
+        ts = item.get("timestamp") or (0.0, 0.0)
+        start = max(0.0, float(ts[0] if ts[0] is not None else 0.0))
+        end = float(ts[1] if ts[1] is not None else start + 2.0)
+        original = (start, end)
+        if start < previous_end and normalized:
+            prev = normalized[-1]
+            prev_ts = prev.get("timestamp") or (0.0, previous_end)
+            prev_start = float(prev_ts[0] or 0.0)
+            # 分批的下一段起點通常更可信（整 60 秒）；優先修短上一段尾端，
+            # 不把整段後續字幕一律往後推。
+            if start >= prev_start + min_duration:
+                prev["timestamp"] = (prev_start, start)
+                previous_end = start
+                adjusted += 1
+            else:
+                start = previous_end
+        if end <= start:
+            end = start + min_duration
+        if abs(start - original[0]) > 0.0005 or abs(end - original[1]) > 0.0005:
+            adjusted += 1
+        item["timestamp"] = (start, end)
+        normalized.append(item)
+        previous_end = end
+    return normalized, adjusted
+
+
+def align_caption_indices(original: list[dict], updated: list[dict]) -> list[tuple[int | None, int | None]]:
+    """依文字序列對齊增刪前後字幕，避免插入一行後把後面數千行誤記為修改。"""
+    before_keys = [strip_punct_for_srt((c.get("text") or "").strip()).casefold() for c in original]
+    after_keys = [strip_punct_for_srt((c.get("text") or "").strip()).casefold() for c in updated]
+    matcher = difflib.SequenceMatcher(a=before_keys, b=after_keys, autojunk=False)
+    aligned: list[tuple[int | None, int | None]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            aligned.extend(zip(range(i1, i2), range(j1, j2)))
+            continue
+        paired = min(i2 - i1, j2 - j1)
+        aligned.extend((i1 + offset, j1 + offset) for offset in range(paired))
+        aligned.extend((idx, None) for idx in range(i1 + paired, i2))
+        aligned.extend((None, idx) for idx in range(j1 + paired, j2))
+    return aligned
 
 
 def _needs_punct(text: str) -> bool:
@@ -717,6 +852,7 @@ def _post_json(url: str, headers: dict, payload: dict, timeout: int = 120) -> di
 
 # ── 每批最多送出的字數（中文約 500 字 ≈ 安全範圍）────────
 LLM_BATCH_CHARS = 500
+LAST_LLM_MERGE_META: dict = {}
 
 
 def _llm_call_once(system: str, user_msg: str, cfg: dict) -> str:
@@ -824,6 +960,7 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
     分批將 chunks 組合為標準 SRT 格式送給 AI校對。
     利用安全回填機制：若 AI 將幻覺行文字刪空，該時間碼保留並留白，後續時間碼絕不跑掉。
     """
+    global LAST_LLM_MERGE_META
     provider = cfg.get("api_provider", "gemini")
     api_key  = (cfg.get("api_key") or "").strip()
     if not api_key:
@@ -871,6 +1008,8 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
     log_fn(f"AI：共分成 {total_batches} 批送出標準 SRT 校對")
     expected_timecode_groups = sum(len(batch) for batch in batches)
     matched_timecode_groups = 0
+    covered_indices: set[int] = set()
+    failed_batches: list[int] = []
 
     # 用來存放最終校對後文字的清單（與原始 chunks 一一對應）
     # 初始化先填入 Breeze ASR 的原始文字，確保萬一 API 失敗時有安全底牌
@@ -916,6 +1055,7 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
                 if current_ts_key and current_ts_key in ts_map:
                     target_idx = ts_map[current_ts_key]
                     final_text_results[target_idx] = " ".join(current_text_lines).strip()
+                    covered_indices.add(target_idx)
                     if current_ts_key not in seen_batch_keys:
                         seen_batch_keys.add(current_ts_key)
                         matched_timecode_groups += 1
@@ -947,6 +1087,7 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
             flush_current_group()
 
         except Exception as e:
+            failed_batches.append(i + 1)
             log_fn(f"警告：第 {i+1} 批 AI 請求失敗（{e}），此批將沿用原始辨識結果。")
 
     if matched_timecode_groups != expected_timecode_groups:
@@ -958,6 +1099,14 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
     # ── 將校對後的文字同步回原始 chunks 結構中 ──────────────────
     for idx, cleaned_text in enumerate(final_text_results):
         chunks[idx]["text"] = cleaned_text
+
+    LAST_LLM_MERGE_META = {
+        "covered_indices": sorted(covered_indices),
+        "covered_count": len(covered_indices),
+        "total_count": len(chunks),
+        "failed_batches": failed_batches,
+        "total_batches": total_batches,
+    }
 
     # 建立純文字輸出
     all_out_lines = [cleaned_text for cleaned_text in final_text_results if cleaned_text]
@@ -1981,10 +2130,13 @@ class DualASRApp(BaseTk):
             result = self.pipeline(seg, return_timestamps=True)
             texts.append((result.get("text") or "").strip())
             offset = s / sr
+            segment_duration = max(0.0, (e - s) / sr)
             for chunk in result.get("chunks") or []:
                 ts   = chunk.get("timestamp") or (0.0, 0.0)
-                st   = ts[0] if ts[0] is not None else 0.0
-                en   = ts[1] if ts[1] is not None else st + 2.0
+                st = max(0.0, min(segment_duration, ts[0] if ts[0] is not None else 0.0))
+                en = max(st, min(segment_duration, ts[1] if ts[1] is not None else st + 2.0))
+                if en <= st:
+                    continue
                 nc   = dict(chunk)
                 nc["timestamp"] = (st + offset, en + offset)
                 chunks.append(nc)
@@ -1992,6 +2144,9 @@ class DualASRApp(BaseTk):
         chunks, removed = suppress_repeat_hallucination(chunks)
         if removed:
             self.log(f"偵測到連續重複的幻覺字幕，已自動清除 {removed} 組。", tag="warn")
+        chunks, adjusted = normalize_chunk_timeline(chunks)
+        if adjusted:
+            self.log(f"已修正 {adjusted} 組跨 60 秒分段的重疊時間碼。", tag="warn")
         return punctuate_chunks(chunks), "".join(texts)
 
     def _process_one(self, inp: str, srt: str, txt: str,

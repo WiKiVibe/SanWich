@@ -251,6 +251,11 @@ echo Verifying install...
 
 echo.
 echo Creating shortcuts...
+if /I "%SANWICH_SETUP_TEST%"=="1" (
+    echo     Test mode: shortcut creation skipped.
+    echo [SHORTCUT SKIP - TEST MODE] >> "%LOG%"
+    goto :AFTER_SHORTCUTS
+)
 set "SHORTCUT_SCRIPT=create_shortcuts.ps1"
 if exist "scripts\install\create_shortcuts.ps1" set "SHORTCUT_SCRIPT=scripts\install\create_shortcuts.ps1"
 if exist "%SHORTCUT_SCRIPT%" (
@@ -267,6 +272,8 @@ if exist "%SHORTCUT_SCRIPT%" (
     echo [SHORTCUT SCRIPT MISSING] >> "%LOG%"
 )
 
+:AFTER_SHORTCUTS
+
 echo.
 echo ============================================================
 echo   Setup finished
@@ -276,6 +283,10 @@ echo First transcription will download the speech model.
 echo The model is about 3 to 4 GB.
 echo Log file: %cd%\%LOG%
 echo.
+if /I "%SANWICH_SETUP_TEST%"=="1" (
+    echo Test mode: automatic launch skipped.
+    exit /b 0
+)
 echo Starting SanWich...
 
 set "APP_PY=SanWich.py"

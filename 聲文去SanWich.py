@@ -30,7 +30,7 @@ from tkinter import filedialog, messagebox
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.2"
 GITHUB_RELEASE_API = "https://api.github.com/repos/WiKiVibe/SanWich/releases/latest"
 GITHUB_TAGS_API = "https://api.github.com/repos/WiKiVibe/SanWich/tags?per_page=1"
 GITHUB_RELEASES_URL = "https://github.com/WiKiVibe/SanWich/releases/latest"
@@ -215,6 +215,12 @@ GREEN_TEXT = "#027A48"
 AI_REVIEW = "#D97706"
 AI_REVIEW_BG = "#3A2A17"
 AI_REVIEW_BORDER = "#B45309"
+AI_CHECKED = "#2F855A"
+AI_CHECKED_BG = "#173126"
+AI_CHECKED_BORDER = "#276749"
+AI_UNCHECKED = "#64748B"
+AI_UNCHECKED_BG = "#252B33"
+AI_UNCHECKED_BORDER = "#475569"
 TIME_ERROR = "#DC2626"
 TIME_ERROR_BG = "#3B1818"
 
@@ -551,7 +557,11 @@ def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
     rules_section = ""
     rules_store = None
     rules_used: list[dict] = []
-    use_rules = bool(cfg.get("use_personal_rules", True)) and PERSONAL_RULES is not None
+    use_rules = (
+        has_feature("custom_rules")
+        and bool(cfg.get("use_personal_rules", True))
+        and PERSONAL_RULES is not None
+    )
     if use_rules:
         try:
             rules_store = PERSONAL_RULES.RuleStore(PERSONAL_RULES_PATH)
@@ -792,14 +802,22 @@ def build_waveform_proxy(media_path: str, target_peaks: int = 6000, keep_proxy: 
         if not samples:
             return [], duration, str(tmp_path) if keep_proxy else None
         bucket = max(1, len(samples) // max(1, target_peaks))
-        peaks = []
-        max_amp = 1
+        # 長訪談若每 0.4 秒只取單一最大峰值，母帶壓縮後幾乎每格都會碰頂，
+        # 波形就會變成整片實心。改用抽樣平均絕對振幅，保留語音強弱與停頓。
+        levels: list[float] = []
         for i in range(0, len(samples), bucket):
-            peak = max(abs(v) for v in samples[i : i + bucket]) if samples[i : i + bucket] else 0
-            peaks.append(peak)
-            if peak > max_amp:
-                max_amp = peak
-        return [p / max_amp for p in peaks], duration, str(tmp_path) if keep_proxy else None
+            end = min(len(samples), i + bucket)
+            stride = max(1, (end - i) // 384)
+            values = [abs(samples[j]) for j in range(i, end, stride)]
+            levels.append(sum(values) / len(values) if values else 0.0)
+        ordered = sorted(levels)
+        if not ordered:
+            return [], duration, str(tmp_path) if keep_proxy else None
+        floor = ordered[min(len(ordered) - 1, int(len(ordered) * 0.05))] * 0.65
+        reference = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
+        span = max(1.0, reference - floor)
+        peaks = [max(0.0, min(1.0, (level - floor) / span)) for level in levels]
+        return peaks, duration, str(tmp_path) if keep_proxy else None
     except Exception:
         return [], 0.0, None
     finally:
@@ -2445,10 +2463,13 @@ class App(ctk.CTk):
             result = self.pipeline(seg, return_timestamps=True)
             texts.append((result.get("text") or "").strip())
             offset = s / sr
+            segment_duration = max(0.0, (e - s) / sr)
             for chunk in result.get("chunks") or []:
                 ts = chunk.get("timestamp") or (0.0, 0.0)
-                st = ts[0] if ts[0] is not None else 0.0
-                en = ts[1] if ts[1] is not None else st + 2.0
+                st = max(0.0, min(segment_duration, ts[0] if ts[0] is not None else 0.0))
+                en = max(st, min(segment_duration, ts[1] if ts[1] is not None else st + 2.0))
+                if en <= st:
+                    continue
                 nc = dict(chunk)
                 nc["timestamp"] = (st + offset, en + offset)
                 chunks.append(nc)
@@ -2456,6 +2477,9 @@ class App(ctk.CTk):
         chunks, removed = CORE.suppress_repeat_hallucination(chunks)
         if removed:
             self.log(f"偵測到連續重複的幻覺字幕，已自動清除 {removed} 組。", "warn")
+        chunks, adjusted = CORE.normalize_chunk_timeline(chunks)
+        if adjusted:
+            self.log(f"已修正 {adjusted} 組跨 60 秒分段的重疊時間碼。", "warn")
         return CORE.punctuate_chunks(chunks), "".join(texts)
 
     def process_one(self, inp: str, srt: str, txt: str, use_llm: bool, context_notes: str, use_text_fix: bool, diarize: bool = False):
@@ -2498,10 +2522,12 @@ class App(ctk.CTk):
                         use_text_fix=effective_use_text_fix,
                         progress_cb=progress,
                     )
+                    llm_meta = dict(getattr(CORE, "LAST_LLM_MERGE_META", {}) or {})
+                    covered_count = int(llm_meta.get("covered_count", len(llm_texts)))
                     after_chunks = [dict(c) for c in chunks]
-                    if len(llm_texts) != len(before_chunks):
+                    if covered_count != len(before_chunks):
                         self.log(
-                            f"AI 校對只回傳 {len(llm_texts)}/{len(before_chunks)} 組可對齊文字；已保護時間碼，但校對內容可能不完整，建議開啟字幕編輯器檢查。",
+                            f"AI 校對只完成 {covered_count}/{len(before_chunks)} 組可對齊文字；未完成的字幕已沿用 Breeze 原文，編輯器會以灰色標示。",
                             "warn",
                         )
                     if len(after_chunks) != len(before_chunks):
@@ -2521,7 +2547,10 @@ class App(ctk.CTk):
                         chunks = after_chunks
                         save_text = llm_plain
                         self.set_chip(self.ai_chip, "done")
-                        self.store_compare(inp, srt, txt, before_chunks, after_chunks, breeze_text, llm_plain)
+                        self.store_compare(
+                            inp, srt, txt, before_chunks, after_chunks, breeze_text, llm_plain,
+                            ai_meta=llm_meta,
+                        )
                         self.log(f"AI 校對完成，共 {len(llm_plain)} 字。", "success")
                 except Exception as exc:
                     self.log(f"AI 校對失敗：{exc}，改儲存原始辨識結果。", "error")
@@ -2639,10 +2668,9 @@ class App(ctk.CTk):
     def record_srt_edits(self, original: list[dict], updated: list[dict], data: dict, action: str) -> int:
         records = []
         now = _dt.datetime.now().isoformat(timespec="seconds")
-        max_len = max(len(original), len(updated))
-        for i in range(max_len):
-            before = original[i] if i < len(original) else {}
-            after = updated[i] if i < len(updated) else {}
+        for before_index, after_index in CORE.align_caption_indices(original, updated):
+            before = original[before_index] if before_index is not None else {}
+            after = updated[after_index] if after_index is not None else {}
             before_ts = before.get("timestamp") or (None, None)
             after_ts = after.get("timestamp") or (None, None)
             before_text = (before.get("text") or "").strip()
@@ -2657,7 +2685,9 @@ class App(ctk.CTk):
                     "input": data.get("inp", ""),
                     "srt": data.get("srt", ""),
                     "txt": data.get("txt", ""),
-                    "index": i + 1,
+                    "index": (after_index + 1) if after_index is not None else (before_index + 1),
+                    "original_index": (before_index + 1) if before_index is not None else None,
+                    "updated_index": (after_index + 1) if after_index is not None else None,
                     "before_start": before_ts[0],
                     "before_end": before_ts[1],
                     "after_start": after_ts[0],
@@ -2764,6 +2794,8 @@ class App(ctk.CTk):
         pan_state = {"active": False, "x": 0, "view": 0.0}
         selection_drag = {"active": False, "x0": 0.0, "x1": 0.0, "rect": None}
         ai_review_indices: set[int] = set()
+        ai_checked_indices: set[int] = set()
+        ai_unchecked_indices: set[int] = set()
         compare_for_file = None
         if getattr(self, "batch_compares", None):
             compare_for_file = self.batch_compares.get(data.get("inp"))
@@ -2772,6 +2804,13 @@ class App(ctk.CTk):
         if compare_for_file is not None:
             self.last_compare = compare_for_file
             before_chunks_for_review = compare_for_file.get("before_chunks") or []
+            ai_meta = compare_for_file.get("ai_meta") or {}
+            covered = ai_meta.get("covered_indices")
+            if covered is None:
+                ai_checked_indices.update(range(min(len(before_chunks_for_review), len(original_chunks))))
+            else:
+                ai_checked_indices.update(int(i) for i in covered if 0 <= int(i) < len(original_chunks))
+                ai_unchecked_indices.update(set(range(len(original_chunks))) - ai_checked_indices)
             for i, (before, current) in enumerate(zip(before_chunks_for_review, original_chunks)):
                 # 剝標點再比對：純標點差異（例如還原後少了逗號）不算 AI 修改
                 bt = CORE.strip_punct_for_srt((before.get("text") or "").strip())
@@ -2842,6 +2881,13 @@ class App(ctk.CTk):
             switch_width=56,
             switch_height=28,
         ).grid(row=0, column=0, sticky="w")
+        if compare_for_file is not None:
+            ctk.CTkLabel(
+                tools,
+                text="橘：AI 有修改　綠：AI 已檢查未改　灰：AI 未完成",
+                text_color=MUTED_ON_DARK,
+                font=(FONT, 11),
+            ).grid(row=0, column=1, sticky="e", padx=(12, 8))
         zoom_var = ctk.DoubleVar(value=90.0 if timeline_duration <= 180 else 45.0)
         ctk.CTkLabel(tools, text="時間軸縮放", text_color=MUTED_ON_DARK, font=(FONT, 12)).grid(row=0, column=2, sticky="e", padx=(12, 8))
         zoom_slider = ctk.CTkSlider(
@@ -3059,7 +3105,7 @@ class App(ctk.CTk):
         timeline_scroll = tk.Scrollbar(
             timeline_shell,
             orient="horizontal",
-            command=timeline_canvas.xview,
+            command=lambda *args: scroll_timeline(*args),
             width=16,
             troughcolor="#2A3036",
             bg="#58616B",
@@ -3091,6 +3137,25 @@ class App(ctk.CTk):
                 anchor="w",
             ).grid(row=0, column=col, sticky="ew", padx=(0, 8))
 
+        page_size = 160
+        page_state = {"index": 0}
+        page_label_var = ctk.StringVar(value="")
+        pager = ctk.CTkFrame(header, fg_color="transparent")
+        pager.grid(row=1, column=0, columnspan=4, sticky="e", pady=(6, 0))
+        ctk.CTkButton(
+            pager, text="‹ 上一頁", width=82, height=28, corner_radius=10,
+            fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 11, "bold"),
+            command=lambda: change_caption_page(-1),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(
+            pager, textvariable=page_label_var, text_color=MUTED_ON_DARK, font=(FONT, 11), width=190,
+        ).pack(side="left")
+        ctk.CTkButton(
+            pager, text="下一頁 ›", width=82, height=28, corner_radius=10,
+            fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK, font=(FONT, 11, "bold"),
+            command=lambda: change_caption_page(1),
+        ).pack(side="left", padx=(6, 0))
+
         body = ctk.CTkScrollableFrame(
             table_shell,
             fg_color="transparent",
@@ -3106,6 +3171,7 @@ class App(ctk.CTk):
             pass
 
         rows = []
+        rendered_row_indices: set[int] = set()
         timeline_redraw_job = {"id": None, "text_id": None, "resize_id": None}
         # 靜態層（背景/刻度/聲波）快取：只有縮放或畫布寬度改變才需要重建
         static_cache = {"zoom": None, "width": None}
@@ -3219,6 +3285,7 @@ class App(ctk.CTk):
             target_origin = max(0.0, min(max_origin, target_origin))
             fraction = target_origin / float(total_width)
             timeline_canvas.xview_moveto(max(0.0, min(1.0, fraction)))
+            win.after_idle(draw_timeline)
 
         def set_playhead(seconds: float, *, center: bool = False, redraw: bool = True):
             playhead["time"] = max(0.0, min(timeline_duration, seconds))
@@ -3300,6 +3367,7 @@ class App(ctk.CTk):
             selected_index["value"] = max(0, min(len(rows) - 1, row_index))
             selected_indices.clear()
             selected_indices.add(selected_index["value"])
+            ensure_caption_page(selected_index["value"])
             if update_playhead:
                 try:
                     start, _end = row_times(selected_index["value"])
@@ -3324,6 +3392,7 @@ class App(ctk.CTk):
 
         def scroll_text_row_to_view(row_index: int):
             try:
+                ensure_caption_page(row_index)
                 body.update_idletasks()
                 canvas = getattr(body, "_parent_canvas", None)
                 if canvas is None:
@@ -3391,6 +3460,10 @@ class App(ctk.CTk):
                 return "time_error"
             if row_index in ai_review_indices:
                 return "ai_review"
+            if row_index in ai_checked_indices:
+                return "ai_checked"
+            if row_index in ai_unchecked_indices:
+                return "ai_unchecked"
             return "normal"
 
         def apply_row_styles():
@@ -3399,6 +3472,8 @@ class App(ctk.CTk):
             except Exception:
                 focused = None
             for idx, row in enumerate(rows):
+                if len(row.get("widgets") or []) != 4:
+                    continue
                 state = row_visual_state(idx)
                 num_btn, start_entry, end_entry, text_box = row["widgets"]
                 # 正在編輯（有焦點）的文字框：組字期間不要 reconfigure，否則注音會被打斷、亂飛
@@ -3415,6 +3490,18 @@ class App(ctk.CTk):
                     end_entry.configure(bg=DARK_2, highlightbackground=LINE, highlightcolor=ORANGE)
                     if not skip_text:
                         text_box.configure(bg=AI_REVIEW_BG, highlightbackground=AI_REVIEW_BORDER, highlightcolor=AI_REVIEW_BORDER)
+                elif state == "ai_checked":
+                    num_btn.configure(bg=AI_CHECKED, activebackground=AI_CHECKED_BORDER)
+                    start_entry.configure(bg=DARK_2, highlightbackground=AI_CHECKED_BORDER, highlightcolor=AI_CHECKED)
+                    end_entry.configure(bg=DARK_2, highlightbackground=AI_CHECKED_BORDER, highlightcolor=AI_CHECKED)
+                    if not skip_text:
+                        text_box.configure(bg=AI_CHECKED_BG, highlightbackground=AI_CHECKED_BORDER, highlightcolor=AI_CHECKED)
+                elif state == "ai_unchecked":
+                    num_btn.configure(bg=AI_UNCHECKED, activebackground=AI_UNCHECKED_BORDER)
+                    start_entry.configure(bg=DARK_2, highlightbackground=AI_UNCHECKED_BORDER, highlightcolor=AI_UNCHECKED)
+                    end_entry.configure(bg=DARK_2, highlightbackground=AI_UNCHECKED_BORDER, highlightcolor=AI_UNCHECKED)
+                    if not skip_text:
+                        text_box.configure(bg=AI_UNCHECKED_BG, highlightbackground=AI_UNCHECKED_BORDER, highlightcolor=AI_UNCHECKED)
                 else:
                     num_btn.configure(bg="#222020", activebackground=GARNET)
                     start_entry.configure(bg=DARK_2, highlightbackground=LINE, highlightcolor=ORANGE)
@@ -3434,18 +3521,28 @@ class App(ctk.CTk):
                 redo_stack.clear()
 
         def apply_chunks_to_rows(chunks: list[dict]):
+            structure_changed = len(rows) != len(chunks)
             while len(rows) > len(chunks):
                 destroy_row(rows.pop())
             while len(rows) < len(chunks):
                 rows.append(create_caption_row({"timestamp": (0.0, 0.0), "text": ""}))
             for row, chunk in zip(rows, chunks):
                 ts = chunk.get("timestamp") or (0.0, 0.0)
-                row["start"].set(CORE.seconds_to_srt_time(ts[0] if ts[0] is not None else 0.0))
-                row["end"].set(CORE.seconds_to_srt_time(ts[1] if ts[1] is not None else 0.0))
-                row["text"].delete("1.0", "end")
-                row["text"].insert("1.0", (chunk.get("text") or "").strip())
-            reflow_rows()
-            draw_timeline()
+                new_start = CORE.seconds_to_srt_time(ts[0] if ts[0] is not None else 0.0)
+                new_end = CORE.seconds_to_srt_time(ts[1] if ts[1] is not None else 0.0)
+                new_text = (chunk.get("text") or "").strip()
+                if row["start"].get() != new_start:
+                    row["start"].set(new_start)
+                if row["end"].get() != new_end:
+                    row["end"].set(new_end)
+                if row["text"].get("1.0", "end").strip() != new_text:
+                    row["text"].delete("1.0", "end")
+                    row["text"].insert("1.0", new_text)
+            if structure_changed:
+                reflow_rows()
+            else:
+                apply_row_styles()
+                draw_timeline()
 
         def undo_last(_event=None):
             if isinstance(getattr(_event, "widget", None), (tk.Text, tk.Entry)):
@@ -3594,6 +3691,8 @@ class App(ctk.CTk):
 
             timeline_canvas.delete("dynamic")
             block_y1, block_y2 = 240, 390
+            visible_left = timeline_canvas.canvasx(0) - 120
+            visible_right = timeline_canvas.canvasx(max(1, timeline_canvas.winfo_width())) + 120
             for idx, row in enumerate(rows):
                 try:
                     start, end = row_times(idx)
@@ -3601,6 +3700,8 @@ class App(ctk.CTk):
                     continue
                 x1 = 24 + start * px_per_second
                 x2 = max(x1 + 8, 24 + end * px_per_second)
+                if x2 < visible_left or x1 > visible_right:
+                    continue
                 selected = idx in selected_indices
                 state = row_visual_state(idx)
                 if state == "time_error":
@@ -3609,6 +3710,12 @@ class App(ctk.CTk):
                 elif state == "ai_review":
                     fill = AI_REVIEW if selected else AI_REVIEW_BG
                     outline = "#FED7AA" if selected else AI_REVIEW_BORDER
+                elif state == "ai_checked":
+                    fill = AI_CHECKED if selected else AI_CHECKED_BG
+                    outline = "#BBF7D0" if selected else AI_CHECKED_BORDER
+                elif state == "ai_unchecked":
+                    fill = AI_UNCHECKED if selected else AI_UNCHECKED_BG
+                    outline = "#CBD5E1" if selected else AI_UNCHECKED_BORDER
                 else:
                     fill = "#423A67" if not selected else "#52447F"
                     outline = "#F2EEFF" if selected else "#514873"
@@ -3655,6 +3762,10 @@ class App(ctk.CTk):
                 outline="",
                 tags=("playhead", "dynamic"),
             )
+
+        def scroll_timeline(*args):
+            timeline_canvas.xview(*args)
+            draw_timeline()
 
         def update_playhead_visual():
             px_per_second = max(1.0, float(zoom_var.get()))
@@ -3893,6 +4004,7 @@ class App(ctk.CTk):
             denom = max(1, total_width - visible)
             fraction = float(pan_state.get("view", 0.0)) - dx / denom
             timeline_canvas.xview_moveto(max(0.0, min(1.0, fraction)))
+            draw_timeline()
             return "break"
 
         def on_middle_release(_event):
@@ -4232,21 +4344,150 @@ class App(ctk.CTk):
                 return 0
 
         def destroy_row(row: dict):
-            for widget in row.get("widgets", []):
+            text_value = row.get("text")
+            if hasattr(text_value, "detach"):
+                text_value.detach()
+            for widget in list(row.get("widgets", [])):
                 try:
                     widget.destroy()
                 except Exception:
                     pass
+            row["widgets"] = []
+
+        class CaptionTextValue:
+            """字幕文字資料與目前頁面的 tk.Text 之間的輕量代理。"""
+
+            def __init__(self, value: str = ""):
+                self.value = (value or "").strip()
+                self.widget = None
+                self.row = None
+
+            def attach(self, widget):
+                self.widget = widget
+                widget.delete("1.0", "end")
+                widget.insert("1.0", self.value)
+
+            def detach(self):
+                if self.widget is not None:
+                    try:
+                        self.value = self.widget.get("1.0", "end").strip()
+                    except Exception:
+                        pass
+                self.widget = None
+
+            def get(self, _start="1.0", _end="end"):
+                if self.widget is not None:
+                    try:
+                        self.value = self.widget.get("1.0", "end").strip()
+                    except Exception:
+                        pass
+                return self.value
+
+            def delete(self, _start="1.0", _end="end"):
+                self.value = ""
+                if self.widget is not None:
+                    self.widget.delete("1.0", "end")
+
+            def insert(self, _index, text):
+                self.value = (text or "").strip()
+                if self.widget is not None:
+                    self.widget.delete("1.0", "end")
+                    self.widget.insert("1.0", self.value)
+
+            def focus_set(self):
+                if self.row in rows:
+                    ensure_caption_page(rows.index(self.row))
+                if self.widget is not None:
+                    self.widget.focus_set()
+
+            def winfo_y(self):
+                return self.widget.winfo_y() if self.widget is not None else 0
+
+        def destroy_row_widgets(row: dict):
+            if row.get("widgets"):
+                destroy_row(row)
+
+        def create_row_widgets(row: dict, global_index: int, local_index: int):
+            num_btn = tk.Button(
+                body, text=str(global_index + 1), width=4, bd=0, relief="flat",
+                bg="#222020", fg=TEXT_ON_DARK, activebackground=GARNET,
+                activeforeground="#FFFFFF", font=(EN_FONT, 12, "bold"),
+                cursor="hand2", takefocus=0, highlightthickness=0,
+                command=lambda r=row: select_row(row_index_for(r)),
+            )
+            start_entry = tk.Entry(
+                body, textvariable=row["start"], width=13, bg=DARK_2, fg=TEXT_ON_DARK,
+                disabledbackground=DARK_2, insertbackground=TEXT_ON_DARK, relief="flat", bd=0,
+                highlightthickness=1, highlightbackground=LINE, highlightcolor=ORANGE,
+                font=(EN_FONT, 12),
+            )
+            end_entry = tk.Entry(
+                body, textvariable=row["end"], width=13, bg=DARK_2, fg=TEXT_ON_DARK,
+                disabledbackground=DARK_2, insertbackground=TEXT_ON_DARK, relief="flat", bd=0,
+                highlightthickness=1, highlightbackground=LINE, highlightcolor=ORANGE,
+                font=(EN_FONT, 12),
+            )
+            text_box = tk.Text(
+                body, height=2, wrap="word", bg=DARK_2, fg=TEXT_ON_DARK,
+                insertbackground=TEXT_ON_DARK, relief="flat", bd=0, highlightthickness=1,
+                highlightbackground=LINE, highlightcolor=ORANGE, padx=8, pady=5, font=(FONT, 13),
+            )
+            mark_english_widget(start_entry)
+            mark_english_widget(end_entry)
+            mark_cjk_text_widget(text_box)
+            row["text"].attach(text_box)
+            row["widgets"] = [num_btn, start_entry, end_entry, text_box]
+            num_btn.grid(row=local_index, column=0, sticky="nw", padx=(0, 8), pady=(2, 6))
+            start_entry.grid(row=local_index, column=1, sticky="nw", padx=(0, 8), pady=(4, 6))
+            end_entry.grid(row=local_index, column=2, sticky="nw", padx=(0, 8), pady=(4, 6))
+            text_box.grid(row=local_index, column=3, sticky="ew", pady=(2, 6))
+
+            def on_caption_text_focus(_event, r=row):
+                idx = row_index_for(r)
+                begin_text_edit(idx)
+                select_row(idx)
+
+            text_box.bind("<FocusIn>", on_caption_text_focus, add="+")
+            text_box.bind("<KeyRelease>", lambda _event: schedule_text_redraw())
+
+        def render_caption_page(page_index: int | None = None):
+            if page_index is not None:
+                page_state["index"] = int(page_index)
+            page_count = max(1, math.ceil(len(rows) / page_size))
+            page_state["index"] = max(0, min(page_count - 1, page_state["index"]))
+            for row in rows:
+                if row.get("widgets"):
+                    destroy_row_widgets(row)
+            rendered_row_indices.clear()
+            start = page_state["index"] * page_size
+            end = min(len(rows), start + page_size)
+            for local_idx, global_idx in enumerate(range(start, end)):
+                create_row_widgets(rows[global_idx], global_idx, local_idx)
+                rendered_row_indices.add(global_idx)
+            page_label_var.set(
+                f"第 {page_state['index'] + 1}/{page_count} 頁｜{start + 1 if rows else 0}-{end} / {len(rows)}"
+            )
+            try:
+                body.update_idletasks()
+                body._parent_canvas.yview_moveto(0)
+            except Exception:
+                pass
+            apply_row_styles()
+
+        def change_caption_page(delta: int):
+            render_caption_page(page_state["index"] + delta)
+            status_var.set(f"字幕列表：{page_label_var.get()}")
+
+        def ensure_caption_page(row_index: int):
+            if not rows:
+                return
+            target = max(0, min(len(rows) - 1, int(row_index))) // page_size
+            if target != page_state["index"] or row_index not in rendered_row_indices:
+                render_caption_page(target)
 
         def reflow_rows():
-            for idx, row in enumerate(rows):
-                num_btn, start_entry, end_entry, text_box = row["widgets"]
-                num_btn.configure(text=str(idx + 1))
-                num_btn.grid_configure(row=idx)
-                start_entry.grid_configure(row=idx)
-                end_entry.grid_configure(row=idx)
-                text_box.grid_configure(row=idx)
-            apply_row_styles()
+            target = selected_row_index() if rows else 0
+            render_caption_page(target // page_size if rows else 0)
             draw_timeline()
 
         def selected_sorted() -> list[int]:
@@ -4384,86 +4625,9 @@ class App(ctk.CTk):
             ts = chunk.get("timestamp") or (0.0, 0.0)
             start_var = ctk.StringVar(value=CORE.seconds_to_srt_time(ts[0] if ts[0] is not None else 0.0))
             end_var = ctk.StringVar(value=CORE.seconds_to_srt_time(ts[1] if ts[1] is not None else (ts[0] or 0.0) + 2.0))
-            # 用原生 tk 元件（非 CTk）：每列重量大幅下降，清單捲動與視窗拖動更順
-            num_btn = tk.Button(
-                body,
-                text="",
-                width=4,
-                bd=0,
-                relief="flat",
-                bg="#222020",
-                fg=TEXT_ON_DARK,
-                activebackground=GARNET,
-                activeforeground="#FFFFFF",
-                font=(EN_FONT, 12, "bold"),
-                cursor="hand2",
-                takefocus=0,
-                highlightthickness=0,
-                command=lambda r=row: select_row(row_index_for(r)),
-            )
-            start_entry = tk.Entry(
-                body,
-                textvariable=start_var,
-                width=13,
-                bg=DARK_2,
-                fg=TEXT_ON_DARK,
-                disabledbackground=DARK_2,
-                insertbackground=TEXT_ON_DARK,
-                relief="flat",
-                bd=0,
-                highlightthickness=1,
-                highlightbackground=LINE,
-                highlightcolor=ORANGE,
-                font=(EN_FONT, 12),
-            )
-            end_entry = tk.Entry(
-                body,
-                textvariable=end_var,
-                width=13,
-                bg=DARK_2,
-                fg=TEXT_ON_DARK,
-                disabledbackground=DARK_2,
-                insertbackground=TEXT_ON_DARK,
-                relief="flat",
-                bd=0,
-                highlightthickness=1,
-                highlightbackground=LINE,
-                highlightcolor=ORANGE,
-                font=(EN_FONT, 12),
-            )
-            text_box = tk.Text(
-                body,
-                height=2,
-                wrap="word",
-                bg=DARK_2,
-                fg=TEXT_ON_DARK,
-                insertbackground=TEXT_ON_DARK,
-                relief="flat",
-                bd=0,
-                highlightthickness=1,
-                highlightbackground=LINE,
-                highlightcolor=ORANGE,
-                padx=8,
-                pady=5,
-                font=(FONT, 13),
-            )
-            mark_english_widget(start_entry)
-            mark_english_widget(end_entry)
-            mark_cjk_text_widget(text_box)
-            text_box.insert("1.0", (chunk.get("text") or "").strip())
-            row.update({"start": start_var, "end": end_var, "text": text_box, "widgets": [num_btn, start_entry, end_entry, text_box]})
-            num_btn.grid(row=0, column=0, sticky="nw", padx=(0, 8), pady=(2, 6))
-            start_entry.grid(row=0, column=1, sticky="nw", padx=(0, 8), pady=(4, 6))
-            end_entry.grid(row=0, column=2, sticky="nw", padx=(0, 8), pady=(4, 6))
-            text_box.grid(row=0, column=3, sticky="ew", pady=(2, 6))
-
-            def on_caption_text_focus(_event, r=row):
-                idx = row_index_for(r)
-                begin_text_edit(idx)
-                select_row(idx)
-
-            text_box.bind("<FocusIn>", on_caption_text_focus, add="+")
-            text_box.bind("<KeyRelease>", lambda _event: schedule_text_redraw())
+            text_value = CaptionTextValue((chunk.get("text") or "").strip())
+            row.update({"start": start_var, "end": end_var, "text": text_value, "widgets": []})
+            text_value.row = row
             start_var.trace_add("write", schedule_timeline_draw)
             end_var.trace_add("write", schedule_timeline_draw)
             return row
@@ -4648,16 +4812,28 @@ class App(ctk.CTk):
         draw_timeline()
         win.after_idle(lambda: force_editor_english(timeline_canvas))
 
+        class TimelineValidationError(ValueError):
+            def __init__(self, row_index: int, message: str):
+                super().__init__(message)
+                self.row_index = row_index
+
         def collect_chunks() -> list[dict]:
             updated = []
             previous_end = 0.0
             for idx, row in enumerate(rows, start=1):
-                start = parse_srt_time(row["start"].get())
-                end = parse_srt_time(row["end"].get())
+                try:
+                    start = parse_srt_time(row["start"].get())
+                    end = parse_srt_time(row["end"].get())
+                except Exception as exc:
+                    raise TimelineValidationError(idx - 1, f"第 {idx} 組：{exc}") from exc
                 if end <= start:
-                    raise ValueError(f"第 {idx} 組結束時間必須晚於開始時間。")
+                    raise TimelineValidationError(idx - 1, f"第 {idx} 組結束時間必須晚於開始時間。")
                 if idx > 1 and start < previous_end:
-                    raise ValueError(f"第 {idx} 組開始時間早於前一組結束時間。")
+                    overlap_ms = round((previous_end - start) * 1000)
+                    raise TimelineValidationError(
+                        idx - 1,
+                        f"第 {idx} 組開始時間早於前一組結束時間（重疊 {overlap_ms} ms）。",
+                    )
                 text = row["text"].get("1.0", "end").strip()
                 updated.append({"timestamp": (start, end), "text": text})
                 previous_end = end
@@ -4668,6 +4844,14 @@ class App(ctk.CTk):
                 updated = collect_chunks()
             except Exception as exc:
                 status_var.set("時間軸需要修正")
+                issue_index = getattr(exc, "row_index", None)
+                if issue_index is not None and rows:
+                    select_row(issue_index, center=True, update_playhead=True, focus_text=False)
+                    scroll_text_row_to_view(issue_index)
+                    try:
+                        win.update_idletasks()
+                    except Exception:
+                        pass
                 messagebox.showerror("時間軸檢查未通過", str(exc))
                 return None
             status_var.set(f"時間軸正常，共 {len(updated)} 組字幕")
@@ -4721,6 +4905,8 @@ class App(ctk.CTk):
         def suggest_rules_after_export():
             """匯出後嘗試從本次修改抽出個人化規則建議，跳對話框讓使用者決定。"""
             if suggestion_state["done"]:
+                return
+            if not has_feature("custom_rules"):
                 return
             if PERSONAL_RULES is None:
                 return
@@ -5475,7 +5661,7 @@ class App(ctk.CTk):
             command=commit,
         ).grid(row=0, column=4, sticky="e")
 
-    def store_compare(self, inp, srt, txt, before_chunks, after_chunks, before_text, after_text):
+    def store_compare(self, inp, srt, txt, before_chunks, after_chunks, before_text, after_text, ai_meta=None):
         self.last_compare = {
             "inp": inp,
             "srt": srt,
@@ -5484,6 +5670,7 @@ class App(ctk.CTk):
             "after_chunks": after_chunks,
             "before_text": before_text,
             "after_text": after_text,
+            "ai_meta": dict(ai_meta or {}),
         }
         self.batch_compares[inp] = self.last_compare
 

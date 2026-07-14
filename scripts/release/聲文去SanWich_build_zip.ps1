@@ -23,9 +23,11 @@ function Write-CleanConfig {
         api_key = ""
         model = "gemini-2.5-flash"
         use_llm = $false
-        use_text_fix = $false
+        use_text_fix = $true
+        txt_diarization_enabled = $false
+        diarization_num_speakers = 3
         output_srt_enabled = $true
-        output_txt_enabled = $true
+        output_txt_enabled = $false
     }
     $cfg | ConvertTo-Json | Set-Content -Encoding UTF8 $Path
 }
@@ -67,6 +69,14 @@ foreach ($item in @($MainPy, $CorePy, $SetupBat)) {
         throw "Missing required source files for the main package."
     }
 }
+$VersionMatch = [regex]::Match(
+    (Get-Content -LiteralPath $MainPy.FullName -Raw -Encoding UTF8),
+    'APP_VERSION\s*=\s*"([^"]+)"'
+)
+if (!$VersionMatch.Success) {
+    throw "Cannot determine APP_VERSION from $($MainPy.FullName)."
+}
+$AppVersion = $VersionMatch.Groups[1].Value
 foreach ($path in @($LogoIco, $LogoPng, $SettingPng, $SettingIco, $BubbleTeaPng, $WikiVibeQrPng)) {
     if (!(Test-Path -LiteralPath $path)) {
         throw "Missing required file: $path"
@@ -253,16 +263,18 @@ $ReadmeBase64 = "6IGy5paH5Y67U2FuV2ljaCDlronoo53ljIUNClNhbldpY2ggaW5zdGFsbGVyIHB
     [System.Text.UTF8Encoding]::new($true)
 )
 
-$Zip = Join-Path $Release "SanWich_setup.zip"
+$ZipBaseName = "SanWich_setup_v$AppVersion"
+$Zip = Join-Path $Release "$ZipBaseName.zip"
 if (Test-Path -LiteralPath $Zip) {
     $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $Zip = Join-Path $Release "SanWich_setup_$Stamp.zip"
-    "Existing SanWich_setup.zip found; writing $Zip instead." | Add-Content -Encoding UTF8 $Log
+    $Zip = Join-Path $Release "${ZipBaseName}_$Stamp.zip"
+    "Existing $ZipBaseName.zip found; writing $Zip instead." | Add-Content -Encoding UTF8 $Log
 }
 Compress-Archive -Path $Stage -DestinationPath $Zip
 
 $Summary = [pscustomobject]@{
     ZipPath = $Zip
+    AppVersion = $AppVersion
     ZipSizeMB = [math]::Round((Get-Item -LiteralPath $Zip).Length / 1MB, 2)
     BundledPythonInstaller = (Test-Path -LiteralPath $PythonInstaller)
 }

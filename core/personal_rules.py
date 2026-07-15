@@ -167,21 +167,31 @@ DEFAULT_CAP_PER_DOMAIN = 100      # 每個領域 active 上限
 DEFAULT_FREEZE_DAYS = 90          # 超過 N 天未使用 → 冷凍
 MERGE_SIMILARITY_THRESHOLD = 0.86 # SequenceMatcher ratio ≥ 此值且 after 完全相同 → 合併
 
+# 規則一律綁專案：未選專案時使用預設庫 id
+DEFAULT_PROJECT_ID = "_default"
+DEFAULT_PROJECT_LABEL = "預設（未選專案）"
+
+
+def normalize_project_id(project_id: str | None) -> str:
+    pid = (project_id or "").strip()
+    return pid if pid else DEFAULT_PROJECT_ID
+
 
 # ─────────────────────────────────────────────────────────────
 # RuleStore：規則庫的存取
 # ─────────────────────────────────────────────────────────────
 
 class RuleStore:
-    """個人化規則庫。檔案格式 JSON，schema version 1。"""
+    """個人化規則庫。檔案格式 JSON，schema version 2（相容 v1 遷移）。"""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: Path):
         self.path = Path(path)
         self._data: dict = {
             "version": self.SCHEMA_VERSION,
             "rules": [],
+            "rejected_pairs": [],  # 永久忽略的 before→after
         }
         if self.path.exists():
             self.load()
@@ -192,14 +202,47 @@ class RuleStore:
             raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
         except Exception:
             # 檔案損毀就視為空，避免整個 App 啟動失敗
-            self._data = {"version": self.SCHEMA_VERSION, "rules": []}
+            self._data = {"version": self.SCHEMA_VERSION, "rules": [], "rejected_pairs": []}
             return
         if not isinstance(raw, dict):
-            self._data = {"version": self.SCHEMA_VERSION, "rules": []}
+            self._data = {"version": self.SCHEMA_VERSION, "rules": [], "rejected_pairs": []}
             return
+        old_ver = int(raw.get("version", 1) or 1)
+        rules = [self._sanitise_rule(r) for r in raw.get("rules", []) if isinstance(r, dict)]
+        # v1 → v2：active + domain，保留原採納統計
+        if old_ver < 2:
+            for r in rules:
+                r["state"] = r.get("state") or "active"
+                r["created_by"] = "migrated"
+                # 舊 adopted_count 視為 model_follow，不冒充 human
+                r["model_follow_count"] = int(r.get("model_follow_count") or r.get("adopted_count") or 0)
+                r["human_accept_count"] = int(r.get("human_accept_count") or 0)
+                r["human_reject_count"] = int(r.get("human_reject_count") or 0)
+                r["manual_confirm_count"] = int(r.get("manual_confirm_count") or 0)
+        # 一律歸專案：舊 domain/global 規則遷入預設專案庫
+        for r in rules:
+            st = (r.get("scope_type") or "").lower()
+            sid = (r.get("scope_id") or "").strip()
+            if st == "project" and sid:
+                r["scope_type"] = "project"
+                r["scope_id"] = sid
+            else:
+                r["scope_type"] = "project"
+                r["scope_id"] = DEFAULT_PROJECT_ID
+        rejected = []
+        for item in raw.get("rejected_pairs") or []:
+            if isinstance(item, (list, tuple)) and len(item) >= 3:
+                rejected.append([str(item[0]), str(item[1]), str(item[2])])
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                # 舊格式 [before, after] → 歸預設專案
+                rejected.append([DEFAULT_PROJECT_ID, str(item[0]), str(item[1])])
+            elif isinstance(item, str) and "→" in item:
+                b, a = item.split("→", 1)
+                rejected.append([DEFAULT_PROJECT_ID, b, a])
         self._data = {
-            "version": int(raw.get("version", self.SCHEMA_VERSION)),
-            "rules": [self._sanitise_rule(r) for r in raw.get("rules", []) if isinstance(r, dict)],
+            "version": self.SCHEMA_VERSION,
+            "rules": rules,
+            "rejected_pairs": rejected,
         }
 
     def save(self) -> None:
@@ -212,22 +255,59 @@ class RuleStore:
     @staticmethod
     def _sanitise_rule(rule: dict) -> dict:
         state = str(rule.get("state") or "active").lower()
-        if state not in ("active", "frozen"):
+        if state not in ("active", "frozen", "candidate", "rejected"):
             state = "active"
+        # 規則一律綁專案（一專案一規則庫）
+        scope_type = "project"
+        domain = str(rule.get("domain") or "通用").strip() or "通用"
+        scope_id = normalize_project_id(rule.get("scope_id") or rule.get("project_id"))
+        created_by = str(rule.get("created_by") or rule.get("source") or "manual").lower()
+        if created_by in ("auto", "srt_editor_export"):
+            created_by = "suggested"
+        if created_by not in ("manual", "suggested", "migrated"):
+            created_by = "manual"
+        human_accept = int(rule.get("human_accept_count") or 0)
+        human_reject = int(rule.get("human_reject_count") or 0)
+        model_follow = int(rule.get("model_follow_count") or rule.get("adopted_count") or 0)
+        model_ignore = int(rule.get("model_ignore_count") or rule.get("rejected_count") or 0)
+        # confidence：以人類確認為主，模型遵循為輔
+        conf = rule.get("confidence")
+        if conf is None:
+            total_h = human_accept + human_reject
+            conf = (human_accept / total_h) if total_h else min(0.5, 0.1 + model_follow * 0.02)
+        try:
+            conf = float(conf)
+        except Exception:
+            conf = 0.0
+        conf = max(0.0, min(1.0, conf))
         return {
             "id": str(rule.get("id") or uuid.uuid4()),
             "before": str(rule.get("before") or "").strip(),
             "after": str(rule.get("after") or "").strip(),
             "context_hint": str(rule.get("context_hint") or "").strip(),
-            "domain": str(rule.get("domain") or "通用").strip() or "通用",
+            "domain": domain,
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "project_id": scope_id,
             "note": str(rule.get("note") or "").strip(),
             "created_at": str(rule.get("created_at") or _dt.datetime.now().isoformat(timespec="seconds")),
             "last_used_at": str(rule.get("last_used_at") or ""),
-            "adopted_count": int(rule.get("adopted_count") or 0),
-            "rejected_count": int(rule.get("rejected_count") or 0),
+            "last_confirmed_at": str(rule.get("last_confirmed_at") or ""),
+            # 向後相容欄位（UI 舊顯示）
+            "adopted_count": model_follow,
+            "rejected_count": model_ignore,
+            "model_follow_count": model_follow,
+            "model_ignore_count": model_ignore,
+            "human_accept_count": human_accept,
+            "human_reject_count": human_reject,
+            "manual_confirm_count": int(rule.get("manual_confirm_count") or 0),
+            "evidence_event_ids": list(rule.get("evidence_event_ids") or [])[:40],
+            "confidence": conf,
             "enabled": bool(rule.get("enabled", True)),
             "source": str(rule.get("source") or "auto"),
+            "created_by": created_by,
             "state": state,
+            "pause_reason": str(rule.get("pause_reason") or ""),
         }
 
     # ── 查詢 ──────────────────────────────────────────────
@@ -235,14 +315,36 @@ class RuleStore:
     def rules(self) -> list[dict]:
         return list(self._data["rules"])
 
-    def existing_keys(self) -> set[tuple[str, str]]:
-        return {(r["before"], r["after"]) for r in self._data["rules"]}
+    def project_id_of(self, rule: dict) -> str:
+        return normalize_project_id(rule.get("project_id") or rule.get("scope_id"))
 
-    def find(self, before: str, after: str) -> dict | None:
+    def by_project(self, project_id: str | None, *, include_rejected: bool = False) -> list[dict]:
+        """只回傳指定專案的規則（一專案一規則庫）。"""
+        pid = normalize_project_id(project_id)
+        out = []
+        for r in self._data["rules"]:
+            if self.project_id_of(r) != pid:
+                continue
+            if not include_rejected and r.get("state") == "rejected":
+                continue
+            out.append(r)
+        return out
+
+    def existing_keys(self, project_id: str | None = None) -> set[tuple[str, str]]:
+        if project_id is None:
+            rules = self._data["rules"]
+        else:
+            rules = self.by_project(project_id, include_rejected=True)
+        return {(r["before"], r["after"]) for r in rules}
+
+    def find(self, before: str, after: str, project_id: str | None = None) -> dict | None:
         b = _normalise(before)
         a = _normalise(after)
+        pid = None if project_id is None else normalize_project_id(project_id)
         for r in self._data["rules"]:
             if r["before"] == b and r["after"] == a:
+                if pid is not None and self.project_id_of(r) != pid:
+                    continue
                 return r
         return None
 
@@ -266,20 +368,33 @@ class RuleStore:
         context_hint: str = "",
         note: str = "",
         source: str = "auto",
+        scope_type: str = "project",
+        scope_id: str = "",
+        project_id: str = "",
+        state: str = "active",
+        created_by: str = "",
+        evidence_event_ids: list | None = None,
+        confidence: float | None = None,
     ) -> dict:
-        """新增規則。若 (before, after) 已存在則更新領域並回傳該筆。"""
+        """新增規則到指定專案庫。同專案內 (before, after) 已存在則更新並回傳。"""
         b = _normalise(before)
         a = _normalise(after)
         if not b or not a:
             raise ValueError("before / after 不可為空")
-        existing = self.find(b, a)
+        pid = normalize_project_id(project_id or scope_id)
+        existing = self.find(b, a, project_id=pid)
         if existing is not None:
             existing["domain"] = domain or existing.get("domain", "通用")
             if context_hint:
                 existing["context_hint"] = context_hint
             if note:
                 existing["note"] = note
+            existing["scope_type"] = "project"
+            existing["scope_id"] = pid
+            existing["project_id"] = pid
             existing["enabled"] = True
+            if state:
+                existing["state"] = state
             return existing
         rule = self._sanitise_rule({
             "before": b,
@@ -288,9 +403,73 @@ class RuleStore:
             "context_hint": context_hint,
             "note": note,
             "source": source,
+            "scope_type": "project",
+            "scope_id": pid,
+            "project_id": pid,
+            "state": state or "active",
+            "created_by": created_by or ("suggested" if source not in ("manual", "") else "manual"),
+            "evidence_event_ids": evidence_event_ids or [],
+            "confidence": confidence,
         })
         self._data["rules"].append(rule)
         return rule
+
+    def rejected_pair_keys(self, project_id: str | None = None) -> set[str]:
+        """回傳 before→after 字串集合；可限單一專案。"""
+        pid = None if project_id is None else normalize_project_id(project_id)
+        out = set()
+        for pair in self._data.get("rejected_pairs") or []:
+            if isinstance(pair, (list, tuple)) and len(pair) >= 3:
+                p_id, b, a = str(pair[0]), str(pair[1]), str(pair[2])
+                if pid is not None and normalize_project_id(p_id) != pid:
+                    continue
+                out.add(f"{b}→{a}")
+            elif isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                if pid is not None and pid != DEFAULT_PROJECT_ID:
+                    continue
+                out.add(f"{pair[0]}→{pair[1]}")
+        return out
+
+    def reject_pair_permanently(self, before: str, after: str, project_id: str | None = None) -> None:
+        b, a = _normalise(before), _normalise(after)
+        if not b or not a:
+            return
+        pid = normalize_project_id(project_id)
+        pairs = self._data.setdefault("rejected_pairs", [])
+        key = [pid, b, a]
+        if key not in pairs:
+            pairs.append(key)
+        existing = self.find(b, a, project_id=pid)
+        if existing is not None:
+            existing["state"] = "rejected"
+            existing["enabled"] = False
+
+    def mark_human_accept(self, rule_id: str) -> None:
+        for r in self._data["rules"]:
+            if r.get("id") == rule_id:
+                r["human_accept_count"] = int(r.get("human_accept_count") or 0) + 1
+                r["manual_confirm_count"] = int(r.get("manual_confirm_count") or 0) + 1
+                r["last_confirmed_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+                total = r["human_accept_count"] + int(r.get("human_reject_count") or 0)
+                r["confidence"] = r["human_accept_count"] / total if total else r.get("confidence", 0.5)
+                return
+
+    def mark_human_reject(self, rule_id: str) -> None:
+        for r in self._data["rules"]:
+            if r.get("id") == rule_id:
+                r["human_reject_count"] = int(r.get("human_reject_count") or 0) + 1
+                total = int(r.get("human_accept_count") or 0) + r["human_reject_count"]
+                r["confidence"] = (int(r.get("human_accept_count") or 0) / total) if total else 0.0
+                return
+
+    def unfreeze(self, rule_id: str) -> bool:
+        for r in self._data["rules"]:
+            if r.get("id") == rule_id:
+                r["state"] = "active"
+                r["enabled"] = True
+                r["pause_reason"] = ""
+                return True
+        return False
 
     def remove(self, rule_id: str) -> bool:
         before = len(self._data["rules"])
@@ -320,11 +499,13 @@ class RuleStore:
     # ── 輪 C：冷凍 / 解凍 / 合併 / 上限 ───────────────
     def set_state(self, rule_id: str, state: str) -> bool:
         state = (state or "active").lower()
-        if state not in ("active", "frozen"):
+        if state not in ("active", "frozen", "candidate", "rejected"):
             state = "active"
         for r in self._data["rules"]:
             if r.get("id") == rule_id:
                 r["state"] = state
+                if state in ("frozen", "rejected"):
+                    r["enabled"] = False
                 return True
         return False
 
@@ -477,52 +658,49 @@ MAX_RULE_SECTION_CHARS = 1500
 MAX_RULES_INJECTED = 30
 
 
-def _rule_strength(rule: dict) -> tuple[int, int, str]:
-    """規則重要性排序鍵：先看採納次數，其次看建立時間。"""
-    adopted = int(rule.get("adopted_count") or 0)
-    rejected = int(rule.get("rejected_count") or 0)
-    score = adopted - rejected
-    return (score, adopted, rule.get("created_at", ""))
+def _rule_strength(rule: dict) -> tuple:
+    """規則重要性：人類確認 > 信心 > 模型遵循 > 最近使用。"""
+    human = int(rule.get("human_accept_count") or 0) - int(rule.get("human_reject_count") or 0)
+    conf = float(rule.get("confidence") or 0)
+    model = int(rule.get("model_follow_count") or rule.get("adopted_count") or 0)
+    last = rule.get("last_confirmed_at") or rule.get("last_used_at") or rule.get("created_at") or ""
+    return (human, conf, model, last)
 
 
 def select_rules_for_prompt(
     store: "RuleStore",
     *,
     domain: str | None = None,
+    project_id: str = "",
+    series_id: str = "",
     top_k: int = MAX_RULES_INJECTED,
     max_chars: int = MAX_RULE_SECTION_CHARS,
 ) -> list[dict]:
     """挑選要塞進 system prompt 的規則。
 
-    1. 只取 enabled=True 的
-    2. 若指定 domain，先放該領域，再用「通用」補齊
-    3. 採納次數高的優先
-    4. 控制總字數不超過 max_chars
+    一專案一規則庫：只取「目前專案」的 enabled + active 規則。
+    未傳 project_id 時使用預設庫 DEFAULT_PROJECT_ID。
     """
+    pid = normalize_project_id(project_id)
     enabled = [
-        r for r in store.rules
+        r for r in store.by_project(pid)
         if r.get("enabled", True) and r.get("state", "active") == "active"
     ]
     if not enabled:
         return []
-    # 分桶：preferred 領域、通用、其它
-    preferred: list[dict] = []
-    common: list[dict] = []
-    others: list[dict] = []
+    # domain 參數僅作排序加權，不再跨專案混入
+    preferred = []
+    others = []
     for r in enabled:
         d = r.get("domain") or "通用"
         if domain and d == domain:
             preferred.append(r)
-        elif d == "通用":
-            common.append(r)
         else:
             others.append(r)
-    for bucket in (preferred, common, others):
+    for bucket in (preferred, others):
         bucket.sort(key=_rule_strength, reverse=True)
-    ordered = preferred + common + others
-    ordered = ordered[: max(1, top_k)]
+    ordered = (preferred + others)[: max(1, top_k)]
 
-    # 字數封頂
     if max_chars <= 0:
         return ordered
     out: list[dict] = []
@@ -550,8 +728,14 @@ def build_rules_section(rules: list[dict]) -> str:
         a = (r.get("after") or "").strip()
         if not b or not a:
             continue
-        adopted = int(r.get("adopted_count") or 0)
-        suffix = f"（採納 {adopted} 次）" if adopted else ""
+        human = int(r.get("human_accept_count") or 0)
+        model = int(r.get("model_follow_count") or r.get("adopted_count") or 0)
+        if human:
+            suffix = f"（人類確認 {human}）"
+        elif model:
+            suffix = f"（模型曾遵循 {model}）"
+        else:
+            suffix = ""
         lines.append(f"- 「{b}」→「{a}」{suffix}")
     lines.append("")
     return "\n".join(lines)
@@ -566,14 +750,14 @@ def track_rule_adoption(
     persist: bool = True,
 ) -> dict:
     """
-    比對 LLM 輸出 vs 輸入，更新規則的採納 / 拒絕計數。
+    比對 LLM 輸出 vs 輸入，只更新「模型遵循度」，不計入人類採納。
 
     判定：
-      - 規則的 before 出現在 original 但不在 response → 採納
-      - before 同時在 original 與 response，且 after 沒在 response 中變多 → 拒絕
-      - before 不在 original：跳過（不計）
+      - before 在 original、after 在 response 增加 → model_follow
+      - before 仍在 response → model_ignore
+      - before 不在 original：跳過
 
-    回傳 {rule_id: "adopted" | "rejected"} 供呼叫端顯示統計。
+    回傳 {rule_id: "followed" | "ignored"}。
     """
     rules = rules_used if rules_used is not None else [r for r in store.rules if r.get("enabled", True)]
     if not rules or not original_text:
@@ -588,17 +772,27 @@ def track_rule_adoption(
         if not b or not a or not rid:
             continue
         if b not in orig:
-            continue  # 規則沒機會作用
+            continue
         orig_b = orig.count(b)
         resp_b = resp.count(b)
         orig_a = orig.count(a)
         resp_a = resp.count(a)
         if resp_b < orig_b and resp_a > orig_a:
-            store.mark_adopted(rid)
-            result[rid] = "adopted"
+            # 模型遵循：更新 model_follow，同步舊 adopted_count 欄位
+            for item in store._data["rules"]:
+                if item.get("id") == rid:
+                    item["model_follow_count"] = int(item.get("model_follow_count") or 0) + 1
+                    item["adopted_count"] = item["model_follow_count"]
+                    item["last_used_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+                    break
+            result[rid] = "followed"
         elif resp_b >= orig_b:
-            store.mark_rejected(rid)
-            result[rid] = "rejected"
+            for item in store._data["rules"]:
+                if item.get("id") == rid:
+                    item["model_ignore_count"] = int(item.get("model_ignore_count") or 0) + 1
+                    item["rejected_count"] = item["model_ignore_count"]
+                    break
+            result[rid] = "ignored"
     if persist and result:
         try:
             store.save()
@@ -609,12 +803,15 @@ def track_rule_adoption(
 
 __all__ = [
     "DEFAULT_DOMAINS",
+    "DEFAULT_PROJECT_ID",
+    "DEFAULT_PROJECT_LABEL",
     "MAX_RULES_INJECTED",
     "MAX_RULE_SECTION_CHARS",
     "RuleStore",
     "build_rules_section",
     "extract_candidates",
     "iter_edits_for_input",
+    "normalize_project_id",
     "select_rules_for_prompt",
     "summarise_candidates",
     "track_rule_adoption",

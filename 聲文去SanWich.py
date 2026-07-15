@@ -30,7 +30,7 @@ from tkinter import filedialog, messagebox
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.4.8"
 GITHUB_RELEASE_API = "https://api.github.com/repos/WiKiVibe/SanWich/releases/latest"
 GITHUB_TAGS_API = "https://api.github.com/repos/WiKiVibe/SanWich/tags?per_page=1"
 GITHUB_RELEASES_URL = "https://github.com/WiKiVibe/SanWich/releases/latest"
@@ -66,6 +66,10 @@ PERSONAL_RULES_PATH = prepare_user_file(
     "personal_rules.json",
     ROOT / "core" / "personal_rules.json",
 )
+PROMPT_TEMPLATES_PATH = user_data_dir() / "prompt_templates.json"
+CUSTOM_DICTIONARY_PATH = user_data_dir() / "custom_dictionary.json"
+EXPERIMENTS_PATH = user_data_dir() / "experiments.json"
+EDIT_HISTORY_LEGACY_PATH = ROOT / "logs" / "srt_edit_history.jsonl"
 
 
 def version_tuple(value: str) -> tuple[int, int, int]:
@@ -422,6 +426,69 @@ def load_personal_rules() -> types.ModuleType | None:
 PERSONAL_RULES = load_personal_rules()
 
 
+def _load_core_module(filename: str, module_name: str) -> types.ModuleType | None:
+    path = here() / "core" / filename
+    if not path.exists():
+        return None
+    try:
+        source = path.read_text(encoding="utf-8")
+        module = types.ModuleType(module_name)
+        module.__file__ = str(path)
+        module.__name__ = module_name
+        sys.modules[module_name] = module
+        exec(compile(source, str(path), "exec"), module.__dict__)
+        return module
+    except Exception:
+        return None
+
+
+LEARNING = _load_core_module("learning.py", "SanWich_learning")
+PROMPT_TEMPLATES = _load_core_module("prompt_templates.py", "SanWich_prompt_templates")
+EXPERIMENTS = _load_core_module("experiments.py", "SanWich_experiments")
+
+# 編輯歷史與學習事件：優先 %APPDATA%，舊 logs/ 一次性遷移
+if LEARNING is not None:
+    try:
+        EDIT_HISTORY_PATH = LEARNING.edit_history_path(user_data_dir())
+        LEARNING.migrate_edit_history_once(EDIT_HISTORY_LEGACY_PATH, EDIT_HISTORY_PATH)
+        FEEDBACK_STORE = LEARNING.FeedbackStore(LEARNING.feedback_path(user_data_dir()))
+        PROJECT_PROFILES = LEARNING.ProjectProfileStore(LEARNING.project_profiles_path(user_data_dir()))
+    except Exception:
+        EDIT_HISTORY_PATH = user_data_dir() / "learning" / "srt_edit_history.jsonl"
+        FEEDBACK_STORE = None
+        PROJECT_PROFILES = None
+else:
+    EDIT_HISTORY_PATH = user_data_dir() / "learning" / "srt_edit_history.jsonl"
+    FEEDBACK_STORE = None
+    PROJECT_PROFILES = None
+
+SUPPLEMENT_HISTORY_STORE = None
+if LEARNING is not None:
+    try:
+        SUPPLEMENT_HISTORY_STORE = LEARNING.SupplementHistoryStore(
+            LEARNING.supplement_history_path(user_data_dir())
+        )
+    except Exception:
+        SUPPLEMENT_HISTORY_STORE = None
+
+TEMPLATE_STORE = None
+DICTIONARY_STORE = None
+if PROMPT_TEMPLATES is not None:
+    try:
+        TEMPLATE_STORE = PROMPT_TEMPLATES.TemplateStore(PROMPT_TEMPLATES_PATH)
+        DICTIONARY_STORE = PROMPT_TEMPLATES.DictionaryStore(CUSTOM_DICTIONARY_PATH)
+    except Exception:
+        TEMPLATE_STORE = None
+        DICTIONARY_STORE = None
+
+EXPERIMENT_CFG = None
+if EXPERIMENTS is not None:
+    try:
+        EXPERIMENT_CFG = EXPERIMENTS.ExperimentConfig(EXPERIMENTS_PATH)
+    except Exception:
+        EXPERIMENT_CFG = None
+
+
 def load_diarization() -> types.ModuleType | None:
     """載入 core/diarization.py（語者分離，僅用於 TXT）。找不到或失敗回 None，不影響主流程。"""
     path = here() / "core" / "diarization.py"
@@ -484,9 +551,12 @@ SUPPORTER_FEATURE_LABELS = {
     "batch_processing": "批次處理",
     "quick_compare_full": "快速對照完整版",
     "custom_rules": "個人化規則庫",
+    "learning_loop": "學習閉環",
     "diarization": "語者分離",
     "domain_prompt_templates": "領域 Prompt 模板",
     "custom_dictionary": "自訂詞庫",
+    "project_profiles": "專案／系列設定",
+    "early_access": "效能實驗入口",
 }
 
 
@@ -549,16 +619,112 @@ def _resolve_personal_rules_state():
         return None, [], False
 
 
+def _default_project_id() -> str:
+    if PERSONAL_RULES is not None:
+        return str(getattr(PERSONAL_RULES, "DEFAULT_PROJECT_ID", "_default"))
+    return "_default"
+
+
+def _active_project_ids() -> tuple[str, str, str]:
+    """回傳 (project_id, series_id, domain)。
+
+    規則庫一律綁專案：未選專案時使用預設庫 id（_default）。
+    """
+    domain = "通用"
+    project_id = _default_project_id()
+    series_id = ""
+    if PROJECT_PROFILES is not None:
+        try:
+            active = PROJECT_PROFILES.get_active()
+            if active and active.get("id"):
+                project_id = str(active.get("id") or project_id)
+                series_id = str(active.get("series_id") or "")
+                domain = str(active.get("domain") or domain)
+        except Exception:
+            pass
+    if PERSONAL_RULES is not None and hasattr(PERSONAL_RULES, "normalize_project_id"):
+        project_id = PERSONAL_RULES.normalize_project_id(project_id)
+    return project_id, series_id, domain
+
+
+def _active_project_label() -> str:
+    """UI 顯示用專案名稱。"""
+    if PROJECT_PROFILES is not None:
+        try:
+            active = PROJECT_PROFILES.get_active()
+            if active and active.get("name"):
+                return str(active.get("name"))
+        except Exception:
+            pass
+    if PERSONAL_RULES is not None:
+        return str(getattr(PERSONAL_RULES, "DEFAULT_PROJECT_LABEL", "預設（未選專案）"))
+    return "預設（未選專案）"
+
+
+def _learning_enabled() -> bool:
+    return has_feature("learning_loop") or has_feature("custom_rules")
+
+
+def record_review_feedback(
+    *,
+    action: str,
+    original_text: str = "",
+    ai_text: str = "",
+    final_text: str = "",
+    timecode_start: float | None = None,
+    timecode_end: float | None = None,
+    input_path: str = "",
+    rule_ids: list[str] | None = None,
+    source: str = "quick_compare",
+) -> None:
+    """寫入人工回饋事件（失敗靜默，不影響主流程）。"""
+    if not _learning_enabled() or FEEDBACK_STORE is None:
+        return
+    try:
+        project_id, series_id, domain = _active_project_ids()
+        # 若設定有 personal_rules_domain 可覆寫
+        try:
+            cfg_domain = str((getattr(CORE, "load_config", lambda: {})() or {}).get("personal_rules_domain") or "")
+        except Exception:
+            cfg_domain = ""
+        if cfg_domain:
+            domain = cfg_domain
+        FEEDBACK_STORE.record(
+            action=action,
+            original_text=original_text,
+            ai_text=ai_text,
+            final_text=final_text,
+            timecode_start=timecode_start,
+            timecode_end=timecode_end,
+            input_path=input_path,
+            project_id=project_id,
+            series_id=series_id,
+            domain=domain,
+            rule_ids=rule_ids or [],
+            provider=str((CORE.load_config() or {}).get("api_provider") or ""),
+            model=str((CORE.load_config() or {}).get("model") or ""),
+            app_version=APP_VERSION,
+            source=source,
+        )
+    except Exception:
+        pass
+
+
 def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
     provider = normalize_provider(cfg.get("api_provider", "gemini"))
     model = normalize_model(provider, cfg.get("model"))
+    segmentation_only = bool(cfg.get("_semantic_segmentation_pass", False))
 
-    # ── 個人化規則注入（階段 5 輪 B）─────────────────────
+    # ── 個人化規則 / 模板 / 詞庫 / 專案上下文注入 ───────────
     rules_section = ""
     rules_store = None
     rules_used: list[dict] = []
+    project_id, series_id, profile_domain = _active_project_ids()
+    domain = str(cfg.get("personal_rules_domain") or profile_domain or "通用")
+
     use_rules = (
-        has_feature("custom_rules")
+        not segmentation_only
+        and has_feature("custom_rules")
         and bool(cfg.get("use_personal_rules", True))
         and PERSONAL_RULES is not None
     )
@@ -567,7 +733,9 @@ def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
             rules_store = PERSONAL_RULES.RuleStore(PERSONAL_RULES_PATH)
             rules_used = PERSONAL_RULES.select_rules_for_prompt(
                 rules_store,
-                domain=str(cfg.get("personal_rules_domain") or "通用"),
+                domain=domain,
+                project_id=project_id,
+                series_id=series_id,
             )
             if rules_used:
                 rules_section = PERSONAL_RULES.build_rules_section(rules_used)
@@ -576,6 +744,44 @@ def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
         except Exception:
             rules_store = None
             rules_used = []
+
+    # 領域 Prompt 模板（Supporter）
+    if not segmentation_only and has_feature("domain_prompt_templates") and TEMPLATE_STORE is not None and bool(cfg.get("use_domain_prompt", True)):
+        try:
+            tpl_domain = str(cfg.get("prompt_template_domain") or domain)
+            section = TEMPLATE_STORE.build_section(tpl_domain)
+            if section:
+                system = (system or "") + "\n" + section
+        except Exception:
+            pass
+
+    # 自訂詞庫（Supporter）
+    if not segmentation_only and has_feature("custom_dictionary") and DICTIONARY_STORE is not None and bool(cfg.get("use_custom_dictionary", True)):
+        try:
+            entries = DICTIONARY_STORE.select_for_prompt(
+                project_id=project_id, series_id=series_id, domain=domain,
+            )
+            section = DICTIONARY_STORE.build_section(entries)
+            if section:
+                system = (system or "") + "\n" + section
+        except Exception:
+            pass
+
+    # 專案上下文
+    if not segmentation_only and has_feature("project_profiles") and PROJECT_PROFILES is not None and bool(cfg.get("use_project_context", True)):
+        try:
+            ctx = PROJECT_PROFILES.context_for_prompt()
+            if ctx:
+                system = (system or "") + "\n" + ctx
+        except Exception:
+            pass
+
+    if not segmentation_only:
+        system = (system or "") + (
+            "\n\n【校正規則衝突優先序】若不同來源的指示互相衝突，必須依序採用："
+            "1. 本次補充資料；2. 目前專案的個人化規則、詞庫與專案資料；"
+            "3. 總編輯 Prompt；4. 基礎 AI 校正預設。低優先來源不得覆蓋高優先來源。"
+        )
 
     if provider == "deepseek":
         api_key = (cfg.get("api_key") or "").strip()
@@ -606,7 +812,7 @@ def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
         patched_cfg["model"] = model
         response_text = _LEGACY_LLM_CALL_ONCE(system, user_msg, patched_cfg)
 
-    # 採納率追蹤（best effort，失敗不影響回傳）
+    # 只記模型遵循度，不冒充人類採納
     if use_rules and rules_store is not None and rules_used:
         try:
             PERSONAL_RULES.track_rule_adoption(
@@ -711,6 +917,14 @@ def clone_chunks(chunks: list[dict]) -> list[dict]:
         )
         nc["text"] = (nc.get("text") or "").strip()
         copied.append(nc)
+    return copied
+
+
+def strip_chunks_for_srt_display(chunks: list[dict]) -> list[dict]:
+    """SRT 一律無標點：編輯器顯示與匯入／匯出保持一致。"""
+    copied = clone_chunks(chunks)
+    for chunk in copied:
+        chunk["text"] = CORE.strip_punct_for_srt(chunk.get("text") or "")
     return copied
 
 
@@ -1180,6 +1394,18 @@ class App(ctk.CTk):
         self.configure(fg_color=GARNET)
 
         self.cfg = normalize_api_cfg(CORE.load_config())
+        # v2 舊預設曾把 15 寫進使用者設定，會遮蔽新版的 11 字語意目標。
+        # 只遷移空白／舊預設值；使用者自行指定的其它數值完整保留。
+        try:
+            segmentation_version = int(self.cfg.get("segmentation_rules_version", 0) or 0)
+        except Exception:
+            segmentation_version = 0
+        if segmentation_version < 3:
+            old_target = self.cfg.get("srt_max_chars_per_line", "")
+            if old_target in (None, "", 0, "0", 11, "11", 15, "15"):
+                self.cfg["srt_max_chars_per_line"] = ""
+            self.cfg["segmentation_rules_version"] = 3
+            CORE.save_config(self.cfg)
         self.input_files: list[str] = []
         self.pipeline = None
         self.cancel_event = threading.Event()
@@ -1190,23 +1416,41 @@ class App(ctk.CTk):
         self.editor_index: int | None = None
         self.preview_process: subprocess.Popen | None = None
         self.notes_placeholder = True
+        # 專案列：有明確選過專案就預設收合成細長條
+        self.project_bar_expanded = True
+        try:
+            if PROJECT_PROFILES is not None and PROJECT_PROFILES.get_active():
+                self.project_bar_expanded = False
+        except Exception:
+            self.project_bar_expanded = True
 
         self.ai_enabled = ctk.BooleanVar(value=bool(self.cfg.get("use_llm", False)))
         self.editor_enabled = ctk.BooleanVar(value=bool(self.cfg.get("use_text_fix", False)))
         self.srt_enabled = ctk.BooleanVar(value=bool(self.cfg.get("output_srt_enabled", True)))
         self.txt_enabled = ctk.BooleanVar(value=bool(self.cfg.get("output_txt_enabled", True)))
         self.diarize_enabled = ctk.BooleanVar(value=bool(self.cfg.get("txt_diarization_enabled", False)))
+        self.srt_diarize_enabled = ctk.BooleanVar(value=bool(self.cfg.get("srt_diarization_enabled", False)))
         _diar_n = int(self.cfg.get("diarization_num_speakers", 3) or 3)
         self.diar_speakers = ctk.StringVar(value=f"{max(2, min(6, _diar_n))} 人")
-
+        # 選填：空字串＝用預設；有填才覆寫
+        _raw_max = self.cfg.get("srt_max_chars_per_line", "")
+        if _raw_max in (None, "", 0, "0"):
+            self.srt_max_chars = ctk.StringVar(value="")
+        else:
+            try:
+                self.srt_max_chars = ctk.StringVar(value=str(int(_raw_max)))
+            except Exception:
+                self.srt_max_chars = ctk.StringVar(value="")
         self.input_path = ctk.StringVar(value="")
         self.output_srt_path = ctk.StringVar(value="")
         self.output_txt_path = ctk.StringVar(value="")
         self.status_text = ctk.StringVar(value="待命")
+        self._job_timer_t0 = None
 
         self.build()
         self.enable_drop_targets()
         self.log("主版已啟動。內部核心以唯讀方式載入。", "success")
+        self.log(f"版本 v{APP_VERSION}｜學習資料目錄：{user_data_dir() / 'learning'}", "model")
         if not _HAS_DND:
             self.log("拖放套件未載入；仍可使用「選擇檔案」。", "warn")
         self.after(1400, self.check_for_updates_async)
@@ -1385,6 +1629,7 @@ class App(ctk.CTk):
         self.main_canvas.bind("<Configure>", self._sync_main_canvas_width)
         self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
 
+        self.project_step_bar(content)
         self.hero_file(content)
         self.output_card(content)
         self.ai_card(content)
@@ -1431,6 +1676,135 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    def project_step_bar(self, parent):
+        """第 0 步：專案。全寬矮列；選完可收成細長條。"""
+        self._project_bar_parent = parent
+        bar = ctk.CTkFrame(
+            parent,
+            fg_color="#1A2426",
+            corner_radius=12,
+            border_width=1,
+            border_color=TEAL_2,
+        )
+        # 橫跨左欄到步驟 3（AI 卡）整寬
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=0, pady=(0, 8))
+        bar.grid_columnconfigure(0, weight=1)
+        self.project_bar = bar
+
+        # ── 展開：矮一點的說明列 ─────────────────────────
+        self.project_bar_expanded_frame = ctk.CTkFrame(bar, fg_color="transparent")
+        self.project_bar_expanded_frame.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(
+            self.project_bar_expanded_frame,
+            text="0.",
+            text_color=TEAL_2,
+            font=(EN_FONT, 16, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(12, 4), pady=6)
+        ctk.CTkLabel(
+            self.project_bar_expanded_frame,
+            text="專案",
+            text_color=TEXT_ON_DARK,
+            font=(FONT, 13, "bold"),
+        ).grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
+
+        self.project_btn = ctk.CTkButton(
+            self.project_bar_expanded_frame,
+            text=self._project_button_label(),
+            width=280,
+            height=28,
+            corner_radius=14,
+            fg_color="#24383A",
+            hover_color="#2F4A4C",
+            text_color="#D8EEEE",
+            font=(FONT, 12, "bold"),
+            border_width=1,
+            border_color=TEAL_2,
+            command=self.open_project_profiles_window,
+            anchor="w",
+        )
+        self.project_btn.grid(row=0, column=2, sticky="w", pady=6)
+
+        ctk.CTkLabel(
+            self.project_bar_expanded_frame,
+            text="可依照專案記憶不同組，個人化規則庫及 AI 校正提示詞資料。",
+            text_color="#8AA3A5",
+            font=(FONT, 11),
+            anchor="w",
+            justify="left",
+        ).grid(row=0, column=3, sticky="ew", padx=(12, 8), pady=6)
+
+        ctk.CTkButton(
+            self.project_bar_expanded_frame,
+            text="收合",
+            width=52,
+            height=26,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color="#2A383A",
+            text_color="#8AA3A5",
+            font=(FONT, 11),
+            border_width=1,
+            border_color="#3A5558",
+            command=lambda: self.set_project_bar_expanded(False),
+        ).grid(row=0, column=4, sticky="e", padx=(0, 10), pady=6)
+
+        # ── 收合：小小一條長框 ───────────────────────────
+        self.project_bar_collapsed_frame = ctk.CTkFrame(bar, fg_color="transparent")
+        self.project_bar_collapsed_frame.grid_columnconfigure(1, weight=1)
+
+        self.project_strip_label = ctk.CTkLabel(
+            self.project_bar_collapsed_frame,
+            text=self._project_strip_text(),
+            text_color="#C5DDDF",
+            font=(FONT, 12, "bold"),
+            anchor="w",
+            cursor="hand2",
+        )
+        self.project_strip_label.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=3)
+        self.project_strip_label.bind("<Button-1>", lambda _e: self.open_project_profiles_window())
+        # 整條也可點
+        self.project_bar_collapsed_frame.bind("<Button-1>", lambda _e: self.open_project_profiles_window())
+
+        ctk.CTkButton(
+            self.project_bar_collapsed_frame,
+            text="展開",
+            width=48,
+            height=22,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color="#2A383A",
+            text_color="#8AA3A5",
+            font=(FONT, 11),
+            border_width=0,
+            command=lambda: self.set_project_bar_expanded(True),
+        ).grid(row=0, column=2, sticky="e", padx=(0, 8), pady=2)
+
+        self.set_project_bar_expanded(self.project_bar_expanded)
+
+    def set_project_bar_expanded(self, expanded: bool):
+        self.project_bar_expanded = bool(expanded)
+        try:
+            self.project_bar_expanded_frame.grid_forget()
+            self.project_bar_collapsed_frame.grid_forget()
+        except Exception:
+            pass
+        if self.project_bar_expanded:
+            self.project_bar_expanded_frame.grid(row=0, column=0, sticky="ew")
+            try:
+                self.project_btn.configure(text=self._project_button_label())
+            except Exception:
+                pass
+        else:
+            self.project_bar_collapsed_frame.grid(row=0, column=0, sticky="ew")
+            try:
+                self.project_strip_label.configure(text=self._project_strip_text())
+            except Exception:
+                pass
+
+    def _project_strip_text(self) -> str:
+        return f"0. 專案　{self._project_button_label()}　·　點此切換"
+
     def hero_file(self, parent):
         card = Card(
             parent,
@@ -1444,7 +1818,7 @@ class App(ctk.CTk):
             fg_color=CARD,
             corner_radius=26,
         )
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, 14), pady=(0, 14))
+        card.grid(row=1, column=0, sticky="nsew", padx=(0, 14), pady=(0, 14))
         ctk.CTkLabel(card.body, text="拖放音訊或影片", text_color=TEXT_ON_DARK, font=(FONT, 15, "bold"), anchor="w").grid(
             row=0, column=0, sticky="w", pady=(4, 4)
         )
@@ -1468,10 +1842,12 @@ class App(ctk.CTk):
             font=(FONT, 14),
         )
         self.input_entry.grid(row=2, column=0, sticky="ew", pady=(24, 0))
+        btn_row = tk.Frame(card.body, bg=card.body.cget("bg"), highlightthickness=0, bd=0)
+        btn_row.grid(row=3, column=0, sticky="w", pady=(16, 0))
         ctk.CTkButton(
-            card.body,
+            btn_row,
             text="選擇檔案",
-            width=164,
+            width=148,
             height=50,
             corner_radius=18,
             fg_color=ORANGE,
@@ -1479,14 +1855,26 @@ class App(ctk.CTk):
             text_color="#FFFFFF",
             font=(FONT, 16, "bold"),
             command=self.choose_input,
-        ).grid(row=3, column=0, sticky="w", pady=(16, 0))
+        ).pack(side="left")
+        ctk.CTkButton(
+            btn_row,
+            text="開啟外部 SRT",
+            width=148,
+            height=50,
+            corner_radius=18,
+            fg_color=DARK,
+            hover_color=GARNET,
+            text_color=TEXT_ON_DARK,
+            font=(FONT, 14, "bold"),
+            command=self.open_external_srt,
+        ).pack(side="left", padx=(10, 0))
 
     def output_card(self, parent):
         card = Card(
             parent,
             "輸出格式",
             step="2",
-            hint="單一檔案可自訂輸出路徑；批次模式會自動使用各原檔名輸出。",
+            hint="路徑可手動改或靠原檔名自動產生。顯示語者需 Supporter；首次會下載離線模型。",
             hint_outside=True,
             hint_color=TEXT_ON_DARK,
             hint_tip_fg=SNOW,
@@ -1494,39 +1882,77 @@ class App(ctk.CTk):
             fg_color=CARD,
             corner_radius=23,
         )
-        card.grid(row=1, column=0, sticky="nsew", padx=(0, 14), pady=(0, 14))
+        card.grid(row=2, column=0, sticky="nsew", padx=(0, 14), pady=(0, 14))
         card.body.grid_columnconfigure(1, weight=1)
-        self.output_option(card.body, 0, "SRT 字幕", "保留時間碼輸出路徑", self.srt_enabled, self.output_srt_path, self.choose_srt, self.open_srt_folder)
-        self.output_option(card.body, 1, "純文字", "純文字輸出路徑", self.txt_enabled, self.output_txt_path, self.choose_txt, self.open_txt_folder)
-        diar_row = tk.Frame(card.body, bg=card.body.cget("bg"), highlightthickness=0, bd=0)
-        diar_row.grid(row=2, column=0, columnspan=4, sticky="w", pady=(14, 0))
-        ctk.CTkCheckBox(
-            diar_row,
-            text="純文字標註語者（語者分離）",
-            variable=self.diarize_enabled,
-            command=self.on_diarize_toggle,
-            fg_color=ORANGE, hover_color=ORANGE_DARK, checkmark_color="#FFFFFF",
-            text_color=TEXT_ON_DARK, font=(FONT, 14, "bold"),
-            checkbox_width=24, checkbox_height=24, corner_radius=5, border_width=2,
-        ).pack(side="left")
+        # 顯示語者分別跟在「SRT 字幕」「純文字」後面；另存為方便改輸出位置
+        self.output_option(
+            card.body, 0, "SRT 字幕", "SRT 輸出路徑（可留空自動命名）",
+            self.srt_enabled, self.output_srt_path, self.choose_srt,
+            speaker_var=self.srt_diarize_enabled, speaker_cmd=self.on_srt_diarize_toggle,
+        )
+        self.output_option(
+            card.body, 1, "純文字", "純文字輸出路徑（可留空自動命名）",
+            self.txt_enabled, self.output_txt_path, self.choose_txt,
+            speaker_var=self.diarize_enabled, speaker_cmd=self.on_diarize_toggle,
+        )
+        opts = tk.Frame(card.body, bg=card.body.cget("bg"), highlightthickness=0, bd=0)
+        opts.grid(row=2, column=0, columnspan=4, sticky="w", pady=(12, 0))
+        ctk.CTkLabel(opts, text="語者人數", text_color=MUTED_ON_DARK, font=(FONT, 13)).pack(side="left")
         InfoBubble(
-            diar_row,
-            "僅影響純文字（TXT）：自動分辨不同說話者，輸出「講者A／講者B…」分段。\n"
-            "SRT 字幕不受影響，維持原本格式、不含語者。\n"
-            "首次使用會自動下載離線模型（約 45MB），需保持網路連線。\n"
-            "請選實際講者人數；不確定時寧可選多 1 個（選太少會把兩人併在一起）。",
+            opts,
+            "開啟任一邊「顯示語者」時使用。請選實際講者人數；不確定時寧可多 1 個。\n"
+            "SRT：字幕前加講者標籤，時間碼不變。純文字：講者A／講者B 分段。",
             text_color=MUTED_ON_DARK, tip_fg=SNOW, tip_text_color=DARK,
-        ).pack(side="left", padx=(6, 0))
-        ctk.CTkLabel(diar_row, text="語者人數", text_color=MUTED_ON_DARK, font=(FONT, 13)).pack(side="left", padx=(16, 6))
+        ).pack(side="left", padx=(4, 6))
         ctk.CTkOptionMenu(
-            diar_row, values=["2 人", "3 人", "4 人", "5 人", "6 人"],
+            opts, values=["2 人", "3 人", "4 人", "5 人", "6 人"],
             variable=self.diar_speakers, command=lambda _v: self.persist_basic_config(),
             width=92, height=30, corner_radius=11,
             fg_color=DARK_2, button_color=ORANGE, button_hover_color=ORANGE_DARK,
-            text_color=TEXT_ON_DARK, font=(FONT, 13), dropdown_fg_color=CARD, dropdown_text_color=TEXT_ON_DARK,
+            text_color=TEXT_ON_DARK, font=(FONT, 13),
+            dropdown_font=(FONT, 13), dropdown_fg_color=CARD, dropdown_text_color=TEXT_ON_DARK,
         ).pack(side="left")
+        ctk.CTkLabel(opts, text="SRT 每句目標字數", text_color=MUTED_ON_DARK, font=(FONT, 13)).pack(
+            side="left", padx=(18, 6)
+        )
+        InfoBubble(
+            opts,
+            "選填。系統會以此為一般閱讀節奏目標；遇到未完成語意時可柔性延長。\n"
+            "留空＝系統預設 13；建議 10–18 字。",
+            text_color=MUTED_ON_DARK, tip_fg=SNOW, tip_text_color=DARK,
+        ).pack(side="left", padx=(0, 6))
+        max_entry = ctk.CTkEntry(
+            opts,
+            textvariable=self.srt_max_chars,
+            width=108,
+            height=30,
+            corner_radius=11,
+            fg_color=DARK_2,
+            border_color=LINE,
+            text_color=TEXT_ON_DARK,
+            placeholder_text="建議 10-18 字",
+            placeholder_text_color=PLACEHOLDER,
+            font=(FONT, 12),
+            justify="center",
+        )
+        max_entry.pack(side="left")
+        max_entry.bind("<FocusOut>", lambda _e: self.persist_basic_config())
+        max_entry.bind("<Return>", lambda _e: self.persist_basic_config())
 
-    def output_option(self, parent, row, title, placeholder, var, path_var, choose_cmd, open_cmd):
+    def output_option(
+        self,
+        parent,
+        row,
+        title,
+        placeholder,
+        var,
+        path_var,
+        open_cmd,
+        *,
+        speaker_var=None,
+        speaker_cmd=None,
+    ):
+        pad = (0, 12) if row == 0 else (0, 0)
         ctk.CTkCheckBox(
             parent,
             text=title,
@@ -1541,7 +1967,7 @@ class App(ctk.CTk):
             checkbox_height=28,
             corner_radius=6,
             border_width=2,
-        ).grid(row=row, column=0, sticky="w", pady=(0, 16) if row == 0 else (0, 0))
+        ).grid(row=row, column=0, sticky="w", pady=pad)
         ctk.CTkEntry(
             parent,
             height=42,
@@ -1553,38 +1979,42 @@ class App(ctk.CTk):
             placeholder_text=placeholder,
             placeholder_text_color=PLACEHOLDER,
             font=(FONT, 14),
-        ).grid(row=row, column=1, sticky="ew", padx=(14, 10), pady=(0, 16) if row == 0 else (0, 0))
+        ).grid(row=row, column=1, sticky="ew", padx=(10, 8), pady=pad)
         ctk.CTkButton(
             parent,
             text="另存為...",
-            width=112,
-            height=38,
+            width=100,
+            height=36,
             corner_radius=14,
             fg_color="#1a1919",
             hover_color=GARNET,
             text_color=TEXT_ON_DARK,
-            font=(FONT, 13, "bold"),
-            command=choose_cmd,
-        ).grid(row=row, column=2, sticky="e", pady=(0, 16) if row == 0 else (0, 0))
-        ctk.CTkButton(
-            parent,
-            text="開啟資料夾",
-            width=112,
-            height=38,
-            corner_radius=14,
-            fg_color="#1a1919",
-            hover_color=GARNET,
-            text_color=TEXT_ON_DARK,
-            font=(FONT, 13, "bold"),
+            font=(FONT, 12, "bold"),
             command=open_cmd,
-        ).grid(row=row, column=3, sticky="e", padx=(8, 0), pady=(0, 16) if row == 0 else (0, 0))
+        ).grid(row=row, column=2, sticky="e", pady=pad)
+        if speaker_var is not None:
+            ctk.CTkCheckBox(
+                parent,
+                text="顯示語者",
+                variable=speaker_var,
+                command=speaker_cmd or self.persist_basic_config,
+                fg_color=ORANGE,
+                hover_color=ORANGE_DARK,
+                checkmark_color="#FFFFFF",
+                text_color=TEXT_ON_DARK,
+                font=(FONT, 13, "bold"),
+                checkbox_width=22,
+                checkbox_height=22,
+                corner_radius=5,
+                border_width=2,
+            ).grid(row=row, column=3, sticky="w", padx=(10, 0), pady=pad)
 
     def ai_card(self, parent):
         card = Card(
             parent,
             "",
             step="3",
-            hint="AI 校對是主要功能；總編輯是進階修字規則。補充資料會一起送入校對提示。",
+            hint="AI 校對是主要功能；總編輯是進階修字規則。補充資料的專名與大小寫會強制套用。",
             hint_color=TEXT_ON_DARK,
             step_action="" if self.setting_step_icon is not None else self.fallback_setting_text,
             step_action_image=self.setting_step_icon,
@@ -1598,7 +2028,8 @@ class App(ctk.CTk):
             fg_color=CARD_DARK,
             corner_radius=26,
         )
-        card.grid(row=0, column=1, rowspan=2, sticky="nsew", pady=(0, 14))
+        # 與步驟 1＋2 對齊（專案第 0 步僅左側）
+        card.grid(row=1, column=1, rowspan=2, sticky="nsew", pady=(0, 14))
         card.body.grid_columnconfigure(0, weight=1)
         self.ai_switch = ctk.CTkSwitch(
             card.body,
@@ -1643,9 +2074,34 @@ class App(ctk.CTk):
             text_color=MUTED_ON_DARK,
             font=(FONT, 13),
         ).grid(row=3, column=0, sticky="w", pady=(6, 0))
-        ctk.CTkLabel(card.body, text="補充資料", text_color=TEXT_ON_DARK, font=(FONT, 17, "bold")).grid(
-            row=4, column=0, sticky="w", pady=(28, 8)
+        notes_head = ctk.CTkFrame(card.body, fg_color="transparent")
+        notes_head.grid(row=4, column=0, sticky="ew", pady=(28, 8))
+        notes_head.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            notes_head, text="補充資料", text_color=TEXT_ON_DARK, font=(FONT, 17, "bold")
+        ).grid(row=0, column=0, sticky="w")
+        self.notes_history_var = ctk.StringVar(value="選擇記憶")
+        self.notes_history_menu = ctk.CTkOptionMenu(
+            notes_head,
+            values=["尚無記憶"],
+            variable=self.notes_history_var,
+            command=self.on_notes_history_select,
+            width=196,
+            height=30,
+            corner_radius=11,
+            fg_color=DARK_2,
+            button_color="#343A43",
+            button_hover_color=GARNET,
+            text_color=MUTED_ON_DARK,
+            font=(FONT, 11),
+            dropdown_font=(FONT, 11),
+            dropdown_fg_color=DARK_2,
+            dropdown_hover_color=GARNET,
+            dropdown_text_color=TEXT_ON_DARK,
+            dynamic_resizing=False,
+            anchor="w",
         )
+        self.notes_history_menu.grid(row=0, column=1, sticky="e")
         self.notes_box = ctk.CTkTextbox(
             card.body,
             height=182,
@@ -1658,10 +2114,11 @@ class App(ctk.CTk):
         )
         self.notes_box.grid(row=5, column=0, sticky="ew")
         self.install_notes_placeholder()
+        self.refresh_notes_history_menu()
 
     def action_card(self, parent):
         card = ctk.CTkFrame(parent, fg_color=CARD_DARK, corner_radius=26, border_width=0, border_color="#0C0D12", height=214)
-        card.grid(row=2, column=0, sticky="nsew", padx=(0, 14), pady=(6, 14))
+        card.grid(row=3, column=0, sticky="nsew", padx=(0, 14), pady=(6, 14))
         card.grid_propagate(False)
         card.grid_columnconfigure(0, weight=1)
         top = tk.Frame(card, bg=CARD_DARK, highlightthickness=0, bd=0)
@@ -1754,7 +2211,7 @@ class App(ctk.CTk):
             corner_radius=23,
             height=234,
         )
-        card.grid(row=2, column=1, sticky="nsew", pady=(6, 14))
+        card.grid(row=3, column=1, sticky="nsew", pady=(6, 14))
         card.grid_propagate(False)
         self.result_label = ctk.CTkLabel(
             card.body,
@@ -1780,6 +2237,18 @@ class App(ctk.CTk):
             command=self.open_srt_editor,
         )
         self.srt_editor_btn.pack(side="left")
+        ctk.CTkButton(
+            row,
+            text="外部 SRT",
+            width=100,
+            height=40,
+            corner_radius=14,
+            fg_color=DARK,
+            hover_color=GARNET,
+            text_color=TEXT_ON_DARK,
+            font=(FONT, 13, "bold"),
+            command=self.open_external_srt,
+        ).pack(side="left", padx=(8, 0))
         self.compare_btn = ctk.CTkButton(
             row,
             text="快速對照",
@@ -1803,7 +2272,7 @@ class App(ctk.CTk):
             fg_color=CARD,
             corner_radius=23,
         )
-        card.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 14))
+        card.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(0, 14))
         self.log_box = ctk.CTkTextbox(
             card.body,
             height=190,
@@ -1834,7 +2303,7 @@ class App(ctk.CTk):
         ).grid(row=0, column=1, sticky="e")
 
     def install_notes_placeholder(self):
-        text = "例如：受訪者｜黃先生（老黃）\n地點｜北投士林科技園區\n術語｜生成式 AI、RAG、向量資料庫"
+        text = "例如：受訪者｜黃先生（老黃）\n地點｜北投士林科技園區\n指定拼法｜填入本次要採用的正確名稱與大小寫"
 
         def show():
             self.notes_box.delete("1.0", "end")
@@ -1862,18 +2331,117 @@ class App(ctk.CTk):
             return ""
         return self.notes_box.get("1.0", "end").strip()
 
+    def refresh_notes_history_menu(self):
+        if not hasattr(self, "notes_history_menu"):
+            return
+        self._notes_history_choices = {}
+        values = []
+        entries = list(getattr(SUPPLEMENT_HISTORY_STORE, "entries", []) or [])
+        for index, entry in enumerate(entries, 1):
+            summary = " ".join(str(entry.get("text") or "").split())
+            if len(summary) > 24:
+                summary = summary[:24] + "…"
+            project_name = str(entry.get("project_name") or "預設").strip() or "預設"
+            if len(project_name) > 12:
+                project_name = project_name[:12] + "…"
+            label = f"{project_name}｜{summary}"
+            if label in self._notes_history_choices:
+                label = f"{label}（{index}）"
+            values.append(label)
+            self._notes_history_choices[label] = entry
+        if entries:
+            values.append("清除全部記憶")
+            display = "選擇記憶"
+        else:
+            values = ["尚無記憶"]
+            display = "尚無記憶"
+        self.notes_history_menu.configure(values=values)
+        self.notes_history_var.set(display)
+
+    def on_notes_history_select(self, value: str):
+        if value == "清除全部記憶":
+            if messagebox.askyesno("清除補充資料記憶", "確定清除所有過去的補充資料記憶？", parent=self):
+                try:
+                    SUPPLEMENT_HISTORY_STORE.clear()
+                    self.log("補充資料記憶已全部清除。", "success")
+                except Exception as exc:
+                    messagebox.showerror("清除失敗", str(exc), parent=self)
+            self.refresh_notes_history_menu()
+            return
+        entry = getattr(self, "_notes_history_choices", {}).get(value)
+        if entry is None:
+            self.refresh_notes_history_menu()
+            return
+        self.notes_box.delete("1.0", "end")
+        self.notes_box.configure(text_color=TEXT_ON_DARK)
+        self.notes_box.insert("1.0", str(entry.get("text") or ""))
+        self.notes_placeholder = False
+        self.notes_history_var.set("選擇記憶")
+
+    def remember_supplement_notes(self, text: str):
+        if not text or SUPPLEMENT_HISTORY_STORE is None:
+            return
+        try:
+            project_id, _series_id, _domain = _active_project_ids()
+            SUPPLEMENT_HISTORY_STORE.remember(
+                text,
+                project_id=project_id,
+                project_name=_active_project_label(),
+            )
+            self.refresh_notes_history_menu()
+        except Exception as exc:
+            self.log(f"補充資料記憶寫入失敗：{exc}", "warn")
+
     def persist_basic_config(self):
         self.cfg["use_llm"] = bool(self.ai_enabled.get())
         self.cfg["use_text_fix"] = bool(self.editor_enabled.get())
         self.cfg["output_srt_enabled"] = bool(self.srt_enabled.get())
         self.cfg["output_txt_enabled"] = bool(self.txt_enabled.get())
         self.cfg["txt_diarization_enabled"] = bool(self.diarize_enabled.get())
+        self.cfg["srt_diarization_enabled"] = bool(self.srt_diarize_enabled.get())
         try:
             _sel = self.diar_speakers.get()
             self.cfg["diarization_num_speakers"] = int(_sel.split()[0])
         except Exception:
             self.cfg["diarization_num_speakers"] = 3
+        raw = (self.srt_max_chars.get() or "").strip()
+        if not raw:
+            # 選填：空＝不寫死、執行時用預設
+            self.cfg["srt_max_chars_per_line"] = ""
+        else:
+            try:
+                self.cfg["srt_max_chars_per_line"] = max(5, min(40, int(raw)))
+                self.srt_max_chars.set(str(self.cfg["srt_max_chars_per_line"]))
+            except Exception:
+                # 非法輸入還原為空（選填）
+                self.srt_max_chars.set("")
+                self.cfg["srt_max_chars_per_line"] = ""
         CORE.save_config(self.cfg)
+
+    def srt_max_line_width(self) -> float:
+        """選填目標字數；空白或無效時回核心目前的語意斷句預設。"""
+        raw = ""
+        try:
+            raw = (self.srt_max_chars.get() or "").strip()
+        except Exception:
+            raw = str(self.cfg.get("srt_max_chars_per_line") or "").strip()
+        if not raw:
+            return float(getattr(CORE, "SRT_TARGET_LINE_WIDTH", 13.0))
+        try:
+            return float(max(5, min(40, int(raw))))
+        except Exception:
+            return float(getattr(CORE, "SRT_TARGET_LINE_WIDTH", 13.0))
+
+    def write_srt_output(self, path: str, chunks: list[dict], preserve_segments: bool = False) -> None:
+        rendered = (
+            CORE.chunks_to_srt_preserving_segments(chunks)
+            if preserve_segments
+            else CORE.chunks_to_srt(chunks, max_line_width=self.srt_max_line_width())
+        )
+        Path(path).write_text(
+            rendered,
+            encoding="utf-8-sig",
+        )
 
     def on_ai_toggle(self):
         if self.ai_enabled.get():
@@ -1989,6 +2557,14 @@ class App(ctk.CTk):
         """語者分離開關：Supporter 功能，未解鎖時自動關回並提示。"""
         if self.diarize_enabled.get() and not has_feature("diarization"):
             self.diarize_enabled.set(False)
+            self.show_supporter_message("diarization")
+            return
+        self.persist_basic_config()
+
+    def on_srt_diarize_toggle(self):
+        """SRT 顯示語者：需語者分離權限；不必連動打開純文字語者。"""
+        if self.srt_diarize_enabled.get() and not has_feature("diarization"):
+            self.srt_diarize_enabled.set(False)
             self.show_supporter_message("diarization")
             return
         self.persist_basic_config()
@@ -2356,8 +2932,9 @@ class App(ctk.CTk):
         if len(input_files) > 1 and not has_feature("batch_processing"):
             self.show_supporter_message("batch_processing")
             return
-        if self.diarize_enabled.get() and not has_feature("diarization"):
+        if (self.diarize_enabled.get() or self.srt_diarize_enabled.get()) and not has_feature("diarization"):
             self.diarize_enabled.set(False)
+            self.srt_diarize_enabled.set(False)
             self.persist_basic_config()
             self.show_supporter_message("diarization")
             return
@@ -2401,7 +2978,10 @@ class App(ctk.CTk):
         self.set_chip(self.breeze_chip, "idle")
         self.set_chip(self.ai_chip, "idle")
         self.set_progress(0, "準備中")
-        args = (jobs, self.ai_enabled.get(), self.notes_text(), self.editor_enabled.get(), self.diarize_enabled.get())
+        need_diar = bool(self.diarize_enabled.get() or self.srt_diarize_enabled.get())
+        context_notes = self.notes_text()
+        self.remember_supplement_notes(context_notes)
+        args = (jobs, self.ai_enabled.get(), context_notes, self.editor_enabled.get(), need_diar)
         threading.Thread(target=self.batch_worker, args=args, daemon=True).start()
 
     def load_breeze_pipeline(self):
@@ -2416,23 +2996,68 @@ class App(ctk.CTk):
         self.log(f"裝置：{device.upper()}")
         if device == "cpu":
             self.log(
-                "目前使用 CPU，載入與轉寫會比較久。若有 NVIDIA 顯示卡，建議安裝 GPU 版環境以大幅加速。",
+                "目前使用 CPU，載入與轉寫會比較久。長音訊請預留較多時間（粗估即時倍率 3–8 倍）。"
+                "若有 NVIDIA 顯示卡，建議安裝 GPU 版環境以大幅加速。",
                 "warn",
             )
+        free_gb = None
+        if EXPERIMENTS is not None:
+            try:
+                free_gb = EXPERIMENTS.check_disk_space_gb(Path.home())
+            except Exception:
+                free_gb = None
+        if free_gb is not None and free_gb < 6:
+            self.log(f"磁碟剩餘約 {free_gb} GB，Breeze 模型約需 3–4 GB，空間可能不足。", "warn")
         self.log(
-            "載入 Breeze-ASR-25；首次使用會自動下載模型，大約需要 3-4 GB，請保持網路連線並耐心等待。",
+            "載入 Breeze-ASR-25；首次使用會自動下載模型（約 3–4 GB）。"
+            "下載中斷可重新啟動再試；不完整暫存會在失敗時清理。",
             "model",
         )
         self.set_busy("載入 Breeze 模型中（首次需下載 3-4 GB）")
+        self.set_progress(5, "檢查／下載 Breeze 模型…")
 
-        processor = WhisperProcessor.from_pretrained(CORE.BREEZE_MODEL_ID)
-        model = WhisperForConditionalGeneration.from_pretrained(
-            CORE.BREEZE_MODEL_ID,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-        ).to(device)
-        model.eval()
+        # 先 snapshot_download 以顯示進度；失敗清理 .incomplete
+        model_id = CORE.BREEZE_MODEL_ID
+        try:
+            from huggingface_hub import snapshot_download
+
+            def _hub_progress(progress):
+                try:
+                    if progress.total:
+                        pct = int(progress.completed / progress.total * 100)
+                        self.set_progress(
+                            min(18, 5 + pct // 8),
+                            f"下載 Breeze 模型 {pct}%（{progress.completed}/{progress.total} 檔）",
+                        )
+                except Exception:
+                    pass
+
+            snapshot_download(
+                repo_id=model_id,
+                resume_download=True,
+                # tqdm 類回報在部分環境不可用；改以 log 提示
+            )
+            self.set_progress(18, "模型檔案就緒，載入中…")
+        except Exception as exc:
+            self.log(f"模型下載進度提示略過（將改由 transformers 載入）：{exc}", "warn")
+
+        try:
+            processor = WhisperProcessor.from_pretrained(model_id)
+            model = WhisperForConditionalGeneration.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
+            ).to(device)
+            model.eval()
+        except Exception as exc:
+            self.log(
+                f"Breeze 模型載入失敗：{exc}。若剛中斷下載，請確認網路與磁碟空間後重試；"
+                "不要手動把半成品資料夾當完成模型使用。",
+                "error",
+            )
+            raise
+
         self.pipeline = AutomaticSpeechRecognitionPipeline(
             model=model,
             tokenizer=processor.tokenizer,
@@ -2440,26 +3065,43 @@ class App(ctk.CTk):
             torch_dtype=dtype,
             device=0 if device == "cuda" else -1,
         )
+        self.set_progress(20, "Breeze 模型載入完成")
         return self.pipeline
 
     def transcribe_breeze(self, audio: dict) -> tuple[list[dict], str]:
         import numpy as np
+        import time as _time
 
         samples = audio["array"]
         sr = audio["sampling_rate"]
+        audio_dur = len(samples) / float(sr) if sr else 0.0
+        t0 = _time.perf_counter()
+
+        # 效能實驗（VAD 等）暫不開放 UI／預設關閉；一律固定切段
+        use_vad = False
         seg_samples = CORE.SEGMENT_SECONDS * sr
         total_segs = max(1, int(np.ceil(len(samples) / seg_samples)))
+        spans = [(i * seg_samples, min(len(samples), (i + 1) * seg_samples)) for i in range(total_segs)]
+
+        total_segs = len(spans)
         chunks = []
         texts = []
 
-        for i in range(total_segs):
+        for i, (s, e) in enumerate(spans):
             if self.cancel_event.is_set():
                 raise TranscriptionCancelled("已取消")
-            s = i * seg_samples
-            e = min(len(samples), s + seg_samples)
             seg = {"array": samples[s:e], "sampling_rate": sr}
-            pct = 20 + int((i / total_segs) * 40)
-            self.set_progress(pct, f"Breeze 辨識中：第 {i + 1}/{total_segs} 段")
+            pct = 20 + int((i / max(total_segs, 1)) * 50)
+            elapsed = _time.perf_counter() - t0
+            eta = ""
+            if EXPERIMENTS is not None:
+                eta = "｜" + EXPERIMENTS.estimate_remaining(i, total_segs, elapsed)
+            stage = "VAD 段" if use_vad else "段"
+            self.set_progress(
+                pct,
+                f"Breeze 辨識中：第 {i + 1}/{total_segs} {stage}"
+                f"（音訊 {EXPERIMENTS.format_duration(audio_dur) if EXPERIMENTS else f'{audio_dur:.0f}s'}）{eta}",
+            )
             result = self.pipeline(seg, return_timestamps=True)
             texts.append((result.get("text") or "").strip())
             offset = s / sr
@@ -2474,6 +3116,25 @@ class App(ctk.CTk):
                 nc["timestamp"] = (st + offset, en + offset)
                 chunks.append(nc)
 
+        elapsed_total = _time.perf_counter() - t0
+        if EXPERIMENTS is not None and audio_dur > 0:
+            bench = EXPERIMENTS.run_micro_benchmark(
+                audio_seconds=audio_dur,
+                backend_name="transformers+VAD" if use_vad else "transformers",
+                elapsed_s=elapsed_total,
+            )
+            self.log(
+                f"轉寫耗時 {bench['elapsed_seconds']}s｜音訊 {bench['audio_seconds']}s｜"
+                f"即時倍率 {bench['realtime_factor']}",
+                "model",
+            )
+            if EXPERIMENT_CFG is not None:
+                try:
+                    EXPERIMENT_CFG.set("last_benchmark", bench)
+                    EXPERIMENT_CFG.save()
+                except Exception:
+                    pass
+
         chunks, removed = CORE.suppress_repeat_hallucination(chunks)
         if removed:
             self.log(f"偵測到連續重複的幻覺字幕，已自動清除 {removed} 組。", "warn")
@@ -2482,8 +3143,11 @@ class App(ctk.CTk):
             self.log(f"已修正 {adjusted} 組跨 60 秒分段的重疊時間碼。", "warn")
         return CORE.punctuate_chunks(chunks), "".join(texts)
 
-    def process_one(self, inp: str, srt: str, txt: str, use_llm: bool, context_notes: str, use_text_fix: bool, diarize: bool = False):
+    def process_one(self, inp: str, srt: str, txt: str, use_llm: bool, context_notes: str,
+                    use_text_fix: bool, diarize: bool = False) -> bool:
         wav_path = None
+        ai_incomplete = False
+        semantic_segmented = False
         try:
             wav_path = CORE.convert_to_wav(inp, self.log)
             self.set_progress(10, "讀取音訊")
@@ -2524,13 +3188,10 @@ class App(ctk.CTk):
                     )
                     llm_meta = dict(getattr(CORE, "LAST_LLM_MERGE_META", {}) or {})
                     covered_count = int(llm_meta.get("covered_count", len(llm_texts)))
+                    coverage_complete = bool(llm_meta.get("complete", covered_count == len(before_chunks)))
                     after_chunks = [dict(c) for c in chunks]
-                    if covered_count != len(before_chunks):
-                        self.log(
-                            f"AI 校對只完成 {covered_count}/{len(before_chunks)} 組可對齊文字；未完成的字幕已沿用 Breeze 原文，編輯器會以灰色標示。",
-                            "warn",
-                        )
                     if len(after_chunks) != len(before_chunks):
+                        ai_incomplete = True
                         mismatch_msg = (
                             f"AI 校對後字幕組數從 {len(before_chunks)} 變成 {len(after_chunks)}，"
                             "為保護時間碼框架，已自動回退為原始辨識結果。\n\n"
@@ -2546,13 +3207,57 @@ class App(ctk.CTk):
                     else:
                         chunks = after_chunks
                         save_text = llm_plain
-                        self.set_chip(self.ai_chip, "done")
                         self.store_compare(
                             inp, srt, txt, before_chunks, after_chunks, breeze_text, llm_plain,
                             ai_meta=llm_meta,
                         )
-                        self.log(f"AI 校對完成，共 {len(llm_plain)} 字。", "success")
+                        if coverage_complete:
+                            self.set_chip(self.ai_chip, "done")
+                            self.log(f"AI 校對完整完成，共 {len(llm_plain)} 字。", "success")
+                            try:
+                                self.set_progress(94, "AI 語意斷句中")
+
+                                def segmentation_progress(window_i, total):
+                                    pct = 94 + int((window_i / max(total, 1)) * 2)
+                                    self.set_progress(pct, f"AI 語意斷句第 {window_i + 1}/{total} 段")
+
+                                semantic_chunks, semantic_meta = CORE.semantic_resegment_chunks(
+                                    after_chunks,
+                                    llm_cfg,
+                                    self.log,
+                                    target_width=self.srt_max_line_width(),
+                                    progress_cb=segmentation_progress,
+                                )
+                                if semantic_meta.get("complete") and semantic_chunks:
+                                    chunks = semantic_chunks
+                                    semantic_segmented = True
+                                    self.log(
+                                        f"AI 語意斷句完成：依完整前後文重新規劃為 {len(semantic_chunks)} 組；"
+                                        "文字已通過逐字零增刪驗證。",
+                                        "success",
+                                    )
+                                else:
+                                    self.log(
+                                        "AI 語意斷句未通過完整性驗證，整份回退本機安全斷句，"
+                                        "不混用兩種切句風格。",
+                                        "warn",
+                                    )
+                            except Exception as segmentation_exc:
+                                self.log(
+                                    f"AI 語意斷句失敗，整份回退本機安全斷句：{segmentation_exc}",
+                                    "warn",
+                                )
+                        else:
+                            ai_incomplete = True
+                            missing_count = max(0, len(before_chunks) - covered_count)
+                            self.set_chip(self.ai_chip, "error")
+                            self.log(
+                                f"AI 校對未完成：自動重試後仍只有 {covered_count}/{len(before_chunks)} 組可對齊；"
+                                f"其餘 {missing_count} 組保留 Breeze 原文並標成灰色。",
+                                "error",
+                            )
                 except Exception as exc:
+                    ai_incomplete = True
                     self.log(f"AI 校對失敗：{exc}，改儲存原始辨識結果。", "error")
                     self.set_chip(self.ai_chip, "error")
                     chunks = before_chunks
@@ -2560,51 +3265,85 @@ class App(ctk.CTk):
             else:
                 self.set_chip(self.ai_chip, "idle")
 
+            spk_chunks = None
+            if diarize and DIARIZATION is not None:
+                try:
+                    self.set_progress(96, "語者分離中（首次需下載模型）")
+                    self.log("語者分離：開始（sherpa-onnx + 3D-Speaker ERes2Net）。", "model")
+                    num_spk = int(self.cfg.get("diarization_num_speakers", 3) or 0)
+
+                    def diar_progress(done_seg, total_seg):
+                        if total_seg:
+                            self.set_progress(96 + int((done_seg / total_seg) * 3), "語者分離中")
+
+                    turns = DIARIZATION.diarize_array(
+                        audio["array"], audio["sampling_rate"],
+                        num_speakers=(num_spk if num_spk > 0 else None),
+                        models_base=ROOT, log=self.log, progress=diar_progress,
+                    )
+                    spk_chunks = DIARIZATION.assign_speakers_to_chunks(chunks, turns)
+                    n_spk = DIARIZATION.count_speakers(spk_chunks)
+                    self.log(f"語者分離完成，偵測到 {n_spk} 位語者。", "success")
+                except Exception as exc:
+                    self.log(f"語者分離失敗：{exc}", "warn")
+                    spk_chunks = None
+            elif diarize and DIARIZATION is None:
+                self.log("找不到語者分離模組（core/diarization.py）。", "warn")
+
+            # SRT：可選在文字前加講者標籤（不改時間碼）
+            srt_chunks = chunks
+            if srt and spk_chunks is not None and bool(self.cfg.get("srt_diarization_enabled", False)):
+                try:
+                    order = DIARIZATION._appearance_order(spk_chunks)
+                    srt_chunks = []
+                    for c in spk_chunks:
+                        nc = dict(c)
+                        text = (nc.get("text") or "").strip()
+                        spk = nc.get("speaker")
+                        label = DIARIZATION.speaker_label(order.get(spk, 0))
+                        if text:
+                            nc["text"] = f"講者{label}：{text}"
+                        srt_chunks.append(nc)
+                    self.log("SRT 已加上語者標籤（時間碼不變）。", "success")
+                except Exception as exc:
+                    self.log(f"SRT 語者標籤略過：{exc}", "warn")
+                    srt_chunks = chunks
+
             if srt:
-                Path(srt).write_text(CORE.chunks_to_srt(chunks), encoding="utf-8-sig")
-                self.log(f"SRT 已儲存：{srt}")
+                self.write_srt_output(srt, srt_chunks, preserve_segments=semantic_segmented)
+                if not semantic_segmented:
+                    segment_meta = dict(getattr(CORE, "LAST_SRT_SEGMENTATION_META", {}) or {})
+                    repaired_count = int(segment_meta.get("repair_count", 0) or 0)
+                    if repaired_count:
+                        self.log(
+                            f"本機備援斷句：已修復 {repaired_count} 個高信心不完整切點。",
+                            "success",
+                        )
+                self.log(f"SRT 已儲存：{srt}（每句目標 {int(self.srt_max_line_width())} 字，語意不完整時可延長）")
             if txt:
                 txt_content = save_text
-                if diarize and DIARIZATION is not None:
+                if spk_chunks is not None and bool(self.cfg.get("txt_diarization_enabled", True)):
                     try:
-                        self.set_progress(96, "語者分離中（首次需下載模型）")
-                        self.log("語者分離：開始（sherpa-onnx + 3D-Speaker ERes2Net，僅套用於純文字）。", "model")
-                        num_spk = int(self.cfg.get("diarization_num_speakers", 3) or 0)
-
-                        def diar_progress(done_seg, total_seg):
-                            if total_seg:
-                                self.set_progress(96 + int((done_seg / total_seg) * 3), "語者分離中")
-
-                        turns = DIARIZATION.diarize_array(
-                            audio["array"], audio["sampling_rate"],
-                            num_speakers=(num_spk if num_spk > 0 else None),
-                            models_base=ROOT, log=self.log, progress=diar_progress,
-                        )
-                        spk_chunks = DIARIZATION.assign_speakers_to_chunks(chunks, turns)
-                        n_spk = DIARIZATION.count_speakers(spk_chunks)
                         speaker_txt = DIARIZATION.chunks_to_speaker_txt(spk_chunks)
                         if speaker_txt.strip():
                             txt_content = speaker_txt
-                            self.log(f"語者分離完成，偵測到 {n_spk} 位語者，已套用於純文字。", "success")
                         else:
                             self.log("語者分離未產生有效分段，純文字改用無語者版本。", "warn")
                     except Exception as exc:
-                        self.log(f"語者分離失敗：{exc}；純文字改用無語者版本。", "warn")
-                        txt_content = save_text
-                elif diarize and DIARIZATION is None:
-                    self.log("找不到語者分離模組（core/diarization.py），純文字改用無語者版本。", "warn")
+                        self.log(f"純文字語者套用失敗：{exc}", "warn")
                 Path(txt).write_text(txt_content.rstrip("\n") + "\n", encoding="utf-8-sig")
                 self.log(f"純文字已儲存：{txt}")
-            editor_chunks = clone_chunks(chunks)
+            editor_chunks = strip_chunks_for_srt_display(srt_chunks if srt else chunks)
             if srt and Path(srt).exists():
                 try:
                     parsed = parse_srt_text(Path(srt).read_text(encoding="utf-8-sig"))
                     if parsed:
-                        editor_chunks = parsed
+                        editor_chunks = strip_chunks_for_srt_display(parsed)
                 except Exception as exc:
                     self.log(f"SRT 編輯器讀取輸出檔失敗，改用內部字幕資料：{exc}", "warn")
-            self.store_result(inp, srt, txt, editor_chunks)
-            self.set_progress(100, "完成")
+            self.store_result(inp, srt, txt, editor_chunks, semantic_segmented=semantic_segmented)
+            self.set_progress(100, "完成（AI 校對未完整完成）" if ai_incomplete else "完成")
+            return not ai_incomplete
         finally:
             if wav_path:
                 Path(wav_path).unlink(missing_ok=True)
@@ -2613,6 +3352,7 @@ class App(ctk.CTk):
         total = len(jobs)
         done = 0
         failed = []
+        ai_incomplete_files = []
         try:
             for idx, (inp, srt, txt) in enumerate(jobs, start=1):
                 if self.cancel_event.is_set():
@@ -2621,8 +3361,12 @@ class App(ctk.CTk):
                 self.log(f"{prefix}開始處理：{inp}")
                 self.set_progress(0, f"{prefix}準備中")
                 try:
-                    self.process_one(inp, srt, txt, use_llm, context_notes, use_text_fix, diarize)
+                    ai_complete = self.process_one(
+                        inp, srt, txt, use_llm, context_notes, use_text_fix, diarize
+                    )
                     done += 1
+                    if not ai_complete:
+                        ai_incomplete_files.append(Path(inp).name)
                 except TranscriptionCancelled:
                     raise
                 except Exception as exc:
@@ -2633,6 +3377,13 @@ class App(ctk.CTk):
             if failed:
                 msg = f"已完成 {done}/{total} 個檔案；{len(failed)} 個失敗。\n\n" + "\n".join(failed[:5])
                 self.after(0, lambda: messagebox.showwarning("批次完成", msg))
+            elif ai_incomplete_files:
+                msg = (
+                    f"已產生 {done} 個檔案，但其中 {len(ai_incomplete_files)} 個的 AI 校對未完整完成。\n\n"
+                    + "\n".join(ai_incomplete_files[:5])
+                    + "\n\n灰色字幕保留 Breeze 原文，不能視為 AI 已校對。"
+                )
+                self.after(0, lambda m=msg: messagebox.showwarning("AI 校對未完成", m))
             else:
                 msg = f"已完成 {done} 個檔案。" if total > 1 else "轉寫與校對完成。"
                 self.after(0, lambda: messagebox.showinfo("完成", msg))
@@ -2648,12 +3399,14 @@ class App(ctk.CTk):
             self.after(0, lambda: self.run_btn.configure(state="normal"))
             self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
 
-    def store_result(self, inp: str, srt: str, txt: str, chunks: list[dict]):
+    def store_result(self, inp: str, srt: str, txt: str, chunks: list[dict],
+                     semantic_segmented: bool = False):
         result = {
             "inp": inp,
             "srt": srt,
             "txt": txt,
             "chunks": clone_chunks(chunks),
+            "semantic_segmented": bool(semantic_segmented),
         }
         self.last_result = result
         self.batch_results.append(result)
@@ -2697,11 +3450,37 @@ class App(ctk.CTk):
                 }
             )
         if records:
-            log_dir = here() / "logs"
-            log_dir.mkdir(exist_ok=True)
-            with (log_dir / "srt_edit_history.jsonl").open("a", encoding="utf-8") as fh:
+            try:
+                EDIT_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with EDIT_HISTORY_PATH.open("a", encoding="utf-8") as fh:
+                    for record in records:
+                        # 不寫完整絕對路徑，改存檔名（學習用指紋另記）
+                        safe = dict(record)
+                        if safe.get("input"):
+                            safe["input_name"] = Path(str(safe["input"])).name
+                        fh.write(json.dumps(safe, ensure_ascii=False) + "\n")
+            except Exception as exc:
+                self.log(f"編輯歷史寫入失敗：{exc}", "warn")
+            # 匯出差異同時寫入學習事件（manual_edit）
+            if _learning_enabled():
                 for record in records:
-                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    try:
+                        before_t = (record.get("before_text") or "").strip()
+                        after_t = (record.get("after_text") or "").strip()
+                        if not before_t or before_t == after_t:
+                            continue
+                        record_review_feedback(
+                            action=LEARNING.ACTION_MANUAL_EDIT if LEARNING else "manual_edit",
+                            original_text=before_t,
+                            ai_text="",
+                            final_text=after_t,
+                            timecode_start=record.get("after_start"),
+                            timecode_end=record.get("after_end"),
+                            input_path=str(record.get("input") or data.get("inp") or ""),
+                            source="srt_editor",
+                        )
+                    except Exception:
+                        pass
         return len(records)
 
     def stop_preview(self):
@@ -2764,7 +3543,8 @@ class App(ctk.CTk):
                 (i for i, r in enumerate(self.batch_results) if r.get("inp") == data.get("inp")),
                 None,
             )
-        original_chunks = clone_chunks(data.get("chunks") or [])
+        # 與 SRT 匯出／匯入一致：編輯器內不顯示標點
+        original_chunks = strip_chunks_for_srt_display(data.get("chunks") or [])
         if not original_chunks:
             messagebox.showinfo("尚無字幕", "目前沒有可編輯的字幕段落。")
             return
@@ -2804,19 +3584,18 @@ class App(ctk.CTk):
         if compare_for_file is not None:
             self.last_compare = compare_for_file
             before_chunks_for_review = compare_for_file.get("before_chunks") or []
+            after_chunks_for_review = compare_for_file.get("after_chunks") or []
             ai_meta = compare_for_file.get("ai_meta") or {}
             covered = ai_meta.get("covered_indices")
-            if covered is None:
-                ai_checked_indices.update(range(min(len(before_chunks_for_review), len(original_chunks))))
-            else:
-                ai_checked_indices.update(int(i) for i in covered if 0 <= int(i) < len(original_chunks))
-                ai_unchecked_indices.update(set(range(len(original_chunks))) - ai_checked_indices)
-            for i, (before, current) in enumerate(zip(before_chunks_for_review, original_chunks)):
-                # 剝標點再比對：純標點差異（例如還原後少了逗號）不算 AI 修改
-                bt = CORE.strip_punct_for_srt((before.get("text") or "").strip())
-                at = CORE.strip_punct_for_srt((current.get("text") or "").strip())
-                if bt != at:
-                    ai_review_indices.add(i)
+            projected_review, projected_checked, projected_unchecked = CORE.project_ai_review_indices(
+                before_chunks_for_review,
+                after_chunks_for_review,
+                original_chunks,
+                covered_indices=covered,
+            )
+            ai_review_indices.update(projected_review)
+            ai_checked_indices.update(projected_checked)
+            ai_unchecked_indices.update(projected_unchecked)
 
         win = ctk.CTkToplevel(self)
         win.title("SRT 字幕編輯器")
@@ -2856,7 +3635,14 @@ class App(ctk.CTk):
             font=(FONT, 22, "bold"),
             anchor="w",
         ).grid(row=0, column=3, sticky="w")
-        status_var = ctk.StringVar(value=f"共 {len(original_chunks)} 組字幕")
+        if compare_for_file is not None and ai_unchecked_indices:
+            initial_status = (
+                f"共 {len(original_chunks)} 組｜AI 完成 {len(ai_checked_indices)}/{len(original_chunks)}｜"
+                f"灰色 {len(ai_unchecked_indices)} 組未完成"
+            )
+        else:
+            initial_status = f"共 {len(original_chunks)} 組字幕"
+        status_var = ctk.StringVar(value=initial_status)
         ctk.CTkLabel(
             head,
             textvariable=status_var,
@@ -4727,6 +5513,7 @@ class App(ctk.CTk):
                 except Exception as exc:
                     messagebox.showerror("匯入失敗", f"無法讀取 SRT：\n{exc}")
                 if chunks:
+                    chunks = strip_chunks_for_srt_display(chunks)
                     push_undo()
                     apply_chunks_to_rows(chunks)
                     loaded.append(f"{len(chunks)} 組字幕")
@@ -4834,7 +5621,8 @@ class App(ctk.CTk):
                         idx - 1,
                         f"第 {idx} 組開始時間早於前一組結束時間（重疊 {overlap_ms} ms）。",
                     )
-                text = row["text"].get("1.0", "end").strip()
+                # 與匯出 SRT 一致：收集時即剝標點，避免編輯器與檔案不一致
+                text = CORE.strip_punct_for_srt(row["text"].get("1.0", "end").strip())
                 updated.append({"timestamp": (start, end), "text": text})
                 previous_end = end
             return updated
@@ -4912,13 +5700,32 @@ class App(ctk.CTk):
                 return
             try:
                 rules_path = PERSONAL_RULES_PATH
-                history_path = here() / "logs" / "srt_edit_history.jsonl"
+                history_path = EDIT_HISTORY_PATH
                 store = PERSONAL_RULES.RuleStore(rules_path)
                 edits = PERSONAL_RULES.iter_edits_for_input(
                     history_path,
                     data.get("inp", ""),
                     since=editor_opened_at,
                 )
+                # 也用 input_name 比對（新格式可能只存檔名）
+                if not edits and data.get("inp"):
+                    try:
+                        name = Path(data.get("inp")).name
+                        all_rows = []
+                        if history_path.exists():
+                            for line in history_path.read_text(encoding="utf-8-sig").splitlines():
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    row = json.loads(line)
+                                except Exception:
+                                    continue
+                                if Path(str(row.get("input") or row.get("input_name") or "")).name == name:
+                                    all_rows.append(row)
+                        edits = all_rows
+                    except Exception:
+                        pass
                 if not edits:
                     return
                 candidates = PERSONAL_RULES.summarise_candidates(
@@ -4927,9 +5734,9 @@ class App(ctk.CTk):
                 )
                 if not candidates:
                     return
-                # 一次匯出只問一次；下次重新打開編輯器才會再問
+                # 一次匯出只問一次；候選直接在個人化規則庫顯示
                 suggestion_state["done"] = True
-                self.open_rule_suggestion_dialog(win, candidates, store, rules_path)
+                self.open_personal_rules_window(win)
             except Exception as exc:
                 # 任何錯誤都不能擋住匯出流程
                 self.log(f"個人化規則建議跳過：{exc}", tag="warn")
@@ -5073,7 +5880,6 @@ class App(ctk.CTk):
         if not has_feature("custom_rules"):
             self.show_supporter_message("custom_rules")
             return
-        """個人化規則庫管理視窗（階段 5 輪 B）。"""
         if PERSONAL_RULES is None:
             messagebox.showinfo("規則庫無法開啟", "找不到 core/personal_rules.py，請確認檔案完整。")
             return
@@ -5084,150 +5890,252 @@ class App(ctk.CTk):
             messagebox.showerror("規則庫載入失敗", str(exc))
             return
 
+        project_id, _, _ = _active_project_ids()
+        project_label = _active_project_label()
+        is_default = project_id == _default_project_id()
+
         anchor = parent or self
         win = ctk.CTkToplevel(anchor)
-        win.title("個人化規則庫")
-        win.geometry("880x620")
-        win.minsize(720, 480)
+        win.title(f"個人化規則庫｜{project_label}")
+        win.geometry("900x680")
+        win.minsize(740, 520)
         win.configure(fg_color=BLACK_KITE)
         self.apply_window_icon(win, "_setting.png")
         win.transient(anchor)
         win.grab_set()
         win.grid_columnconfigure(0, weight=1)
-        win.grid_rowconfigure(2, weight=1)
+        win.grid_rowconfigure(3, weight=1)
 
-        domains = list(getattr(PERSONAL_RULES, "DEFAULT_DOMAINS", ("通用",)))
-
-        # ── 標題列 ─────────────────────────────────────────
+        # ── 標題 ───────────────────────────────────────────
         head = ctk.CTkFrame(win, fg_color="transparent")
-        head.grid(row=0, column=0, sticky="ew", padx=24, pady=(20, 4))
+        head.grid(row=0, column=0, sticky="ew", padx=24, pady=(18, 4))
         head.grid_columnconfigure(0, weight=1)
-        title_lbl = ctk.CTkLabel(
+        ctk.CTkLabel(
             head,
-            text="個人化規則庫",
+            text=f"個人化規則庫｜{project_label}",
             text_color=TEXT_ON_DARK,
             font=(FONT, 22, "bold"),
             anchor="w",
-        )
-        title_lbl.grid(row=0, column=0, sticky="w")
-        stats_lbl = ctk.CTkLabel(
-            head,
-            text="",
-            text_color=MUTED_ON_DARK,
-            font=(FONT, 13),
-            anchor="e",
-        )
+        ).grid(row=0, column=0, sticky="w")
+        stats_lbl = ctk.CTkLabel(head, text="", text_color=MUTED_ON_DARK, font=(FONT, 13), anchor="e")
         stats_lbl.grid(row=0, column=1, sticky="e")
+        hint = (
+            "目前未選專案，顯示「預設」規則庫。切換專案後會換成該專案自己的規則。"
+            if is_default
+            else f"目前專案：{project_label}。切換專案會看到另一套規則庫；AI 校對只套用此專案的規則。"
+        )
         ctk.CTkLabel(
             head,
-            text=f"檔案：{rules_path}",
-            text_color=MUTED_ON_DARK,
-            font=(FONT, 11),
-            anchor="w",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+            text=hint + " 學習在背景累積，達門檻時出現「待確認候選」。",
+            text_color=MUTED_ON_DARK, font=(FONT, 12), anchor="w", justify="left", wraplength=820,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        # ── 篩選列 ─────────────────────────────────────────
+        # ── 新增詞庫 BAR ───────────────────────────────────
+        add_bar = ctk.CTkFrame(win, fg_color=CARD_DARK, corner_radius=12)
+        add_bar.grid(row=1, column=0, sticky="ew", padx=24, pady=(10, 4))
+        add_bar.grid_columnconfigure(1, weight=1)
+        add_bar.grid_columnconfigure(3, weight=1)
+        ctk.CTkLabel(add_bar, text="新增詞庫", text_color=TEXT_ON_DARK, font=(FONT, 14, "bold")).grid(
+            row=0, column=0, padx=(14, 10), pady=12, sticky="w"
+        )
+        wrong_var = ctk.StringVar(value="")
+        right_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            add_bar, textvariable=wrong_var, placeholder_text="錯誤寫法",
+            height=36, fg_color=DARK_2, border_color=LINE, text_color=TEXT_ON_DARK, font=(FONT, 13),
+        ).grid(row=0, column=1, sticky="ew", pady=12)
+        ctk.CTkLabel(add_bar, text="→", text_color=MUTED_ON_DARK, font=(FONT, 16, "bold")).grid(
+            row=0, column=2, padx=8
+        )
+        ctk.CTkEntry(
+            add_bar, textvariable=right_var, placeholder_text="正確寫法",
+            height=36, fg_color=DARK_2, border_color=LINE, text_color=TEXT_ON_DARK, font=(FONT, 13),
+        ).grid(row=0, column=3, sticky="ew", pady=12)
+
+        def add_word():
+            b = wrong_var.get().strip()
+            a = right_var.get().strip()
+            if not b or not a:
+                messagebox.showinfo("請填寫", "請輸入錯誤寫法與正確寫法。", parent=win)
+                return
+            if b == a:
+                messagebox.showinfo("無需新增", "兩邊文字相同。", parent=win)
+                return
+            try:
+                store.add(
+                    b, a, domain="通用", source="manual", created_by="manual", state="active",
+                    project_id=project_id, scope_type="project", scope_id=project_id,
+                )
+                store.save()
+            except Exception as exc:
+                messagebox.showerror("新增失敗", str(exc), parent=win)
+                return
+            wrong_var.set("")
+            right_var.set("")
+            self.log(f"規則庫新增（{project_label}）：{b} → {a}", "success")
+            render_all()
+
+        ctk.CTkButton(
+            add_bar, text="新增", width=88, height=36, corner_radius=12,
+            fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF",
+            font=(FONT, 13, "bold"), command=add_word,
+        ).grid(row=0, column=4, padx=(10, 14), pady=12)
+
+        # ── 搜尋 ───────────────────────────────────────────
         filt = ctk.CTkFrame(win, fg_color="transparent")
-        filt.grid(row=1, column=0, sticky="ew", padx=24, pady=(8, 0))
-        filt.grid_columnconfigure(3, weight=1)
-        ctk.CTkLabel(filt, text="領域：", text_color=MUTED_ON_DARK, font=(FONT, 12)).grid(row=0, column=0, sticky="w")
-        domain_filter_var = ctk.StringVar(value="全部")
-        ctk.CTkOptionMenu(
-            filt,
-            variable=domain_filter_var,
-            values=["全部"] + domains,
-            width=110,
-            fg_color=DARK,
-            button_color=DARK,
-            button_hover_color=GARNET,
-            text_color=TEXT_ON_DARK,
-            font=(FONT, 12, "bold"),
-            dropdown_font=(FONT, 12),
-        ).grid(row=0, column=1, padx=(4, 12), sticky="w")
-        ctk.CTkLabel(filt, text="搜尋：", text_color=MUTED_ON_DARK, font=(FONT, 12)).grid(row=0, column=2, sticky="w")
+        filt.grid(row=2, column=0, sticky="ew", padx=24, pady=(6, 0))
+        filt.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(filt, text="搜尋", text_color=MUTED_ON_DARK, font=(FONT, 12)).grid(row=0, column=0, sticky="w")
         search_var = ctk.StringVar(value="")
         ctk.CTkEntry(
-            filt,
-            textvariable=search_var,
-            placeholder_text="輸入 before / after 關鍵字",
-            height=32,
-            fg_color=DARK_2,
-            border_color=LINE,
-            text_color=TEXT_ON_DARK,
-            font=(FONT, 12),
-        ).grid(row=0, column=3, sticky="ew", padx=(4, 8))
-        show_frozen_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            filt,
-            text="顯示冷凍",
-            variable=show_frozen_var,
-            checkbox_width=18,
-            checkbox_height=18,
-            corner_radius=4,
-            fg_color=ORANGE,
-            hover_color=ORANGE_DARK,
-            border_color=LINE,
-            text_color=MUTED_ON_DARK,
-            font=(FONT, 12),
-        ).grid(row=0, column=4, sticky="e")
+            filt, textvariable=search_var, placeholder_text="關鍵字",
+            height=32, fg_color=DARK_2, border_color=LINE, text_color=TEXT_ON_DARK, font=(FONT, 12),
+        ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        # ── 規則列表 ───────────────────────────────────────
         body = ctk.CTkScrollableFrame(
-            win,
-            fg_color=CARD_DARK,
-            corner_radius=13,
-            scrollbar_button_color=DARK,
-            scrollbar_button_hover_color=ORANGE_DARK,
+            win, fg_color=CARD_DARK, corner_radius=13,
+            scrollbar_button_color=DARK, scrollbar_button_hover_color=ORANGE_DARK,
         )
-        body.grid(row=2, column=0, sticky="nsew", padx=24, pady=(10, 8))
-        body.grid_columnconfigure(1, weight=1)
+        body.grid(row=3, column=0, sticky="nsew", padx=24, pady=(10, 8))
+        body.grid_columnconfigure(0, weight=1)
 
-        row_widgets: list[dict] = []
+        def load_candidates() -> list[dict]:
+            if not _learning_enabled() or FEEDBACK_STORE is None or LEARNING is None:
+                return []
+            try:
+                events = FEEDBACK_STORE.iter_events()
+                # 只彙整「目前專案」的學習事件
+                def _event_project(ev: dict) -> str:
+                    pid = (ev.get("project_id") or "").strip()
+                    if not pid:
+                        return _default_project_id()
+                    return PERSONAL_RULES.normalize_project_id(pid) if hasattr(PERSONAL_RULES, "normalize_project_id") else pid
+
+                events = [e for e in events if _event_project(e) == project_id]
+                extract = getattr(PERSONAL_RULES, "extract_candidates", None)
+                return LEARNING.aggregate_candidates_from_events(
+                    events,
+                    extract_fn=extract,
+                    existing_keys=store.existing_keys(project_id),
+                    threshold=getattr(LEARNING, "DEFAULT_CANDIDATE_THRESHOLD", 2),
+                    reject_ids=store.rejected_pair_keys(project_id) if hasattr(store, "rejected_pair_keys") else set(),
+                )
+            except Exception:
+                return []
 
         def update_stats():
-            rules = store.rules
-            summary = store.summarise_state() if hasattr(store, "summarise_state") else {
-                "total": len(rules),
-                "active": sum(1 for r in rules if r.get("state", "active") == "active"),
-                "frozen": sum(1 for r in rules if r.get("state", "active") == "frozen"),
-            }
-            enabled = sum(1 for r in rules if r.get("enabled", True))
-            adopted = sum(int(r.get("adopted_count") or 0) for r in rules)
+            rules = store.by_project(project_id) if hasattr(store, "by_project") else store.rules
+            enabled = sum(1 for r in rules if r.get("enabled", True) and r.get("state", "active") == "active")
+            cands = load_candidates()
             stats_lbl.configure(
-                text=f"共 {summary['total']} 條（啟用 {summary['active']} / 冷凍 {summary['frozen']}），採納次數 {adopted}",
+                text=f"{project_label}｜規則 {len(rules)} 條（啟用 {enabled}）｜候選 {len(cands)}"
             )
 
-        def matches_filter(rule: dict) -> bool:
-            if not show_frozen_var.get() and rule.get("state", "active") == "frozen":
-                return False
-            df = domain_filter_var.get()
-            if df != "全部" and rule.get("domain") != df:
-                return False
-            kw = search_var.get().strip()
-            if kw:
-                if kw not in (rule.get("before") or "") and kw not in (rule.get("after") or ""):
-                    return False
-            return True
+        def render_all():
+            for child in body.winfo_children():
+                child.destroy()
+            update_stats()
+            row_i = 0
+            candidates = load_candidates()
+            if candidates:
+                ctk.CTkLabel(
+                    body,
+                    text=f"待確認候選（重複修改達門檻，共 {len(candidates)} 條）",
+                    text_color=ORANGE, font=(FONT, 14, "bold"), anchor="w",
+                ).grid(row=row_i, column=0, sticky="w", padx=10, pady=(10, 4))
+                row_i += 1
+                for cand in candidates:
+                    frame = ctk.CTkFrame(body, fg_color=DARK_2, corner_radius=10)
+                    frame.grid(row=row_i, column=0, sticky="ew", padx=8, pady=3)
+                    frame.grid_columnconfigure(0, weight=1)
+                    ctk.CTkLabel(
+                        frame,
+                        text=f"「{cand['before']}」 → 「{cand['after']}」　確認 {cand.get('positive', 0)} 次",
+                        text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), anchor="w",
+                    ).grid(row=0, column=0, sticky="w", padx=12, pady=(8, 0))
+                    src = "、".join((cand.get("sources") or [])[:4])
+                    ctk.CTkLabel(
+                        frame,
+                        text=f"來源：{src or '—'}（背景學習，非自動寫入規則）",
+                        text_color=MUTED_ON_DARK, font=(FONT, 11), anchor="w",
+                    ).grid(row=1, column=0, sticky="w", padx=12, pady=(2, 8))
+                    btns = ctk.CTkFrame(frame, fg_color="transparent")
+                    btns.grid(row=0, column=1, rowspan=2, padx=8)
 
-        def render():
-            for w in row_widgets:
-                try:
-                    w["frame"].destroy()
-                except Exception:
-                    pass
-            row_widgets.clear()
-            visible = [r for r in store.rules if matches_filter(r)]
-            visible.sort(key=lambda r: (-int(r.get("adopted_count") or 0), r.get("created_at", "")))
-            for i, rule in enumerate(visible):
+                    def accept_cand(c=cand):
+                        try:
+                            store.add(
+                                c["before"], c["after"], domain="通用",
+                                source="learning_candidate", created_by="suggested",
+                                state="active",
+                                project_id=project_id, scope_type="project", scope_id=project_id,
+                                evidence_event_ids=c.get("evidence_event_ids") or [],
+                                confidence=c.get("confidence"),
+                            )
+                            store.save()
+                            self.log(f"已加入規則（{project_label}）：{c['before']} → {c['after']}", "success")
+                        except Exception as exc:
+                            messagebox.showerror("加入失敗", str(exc), parent=win)
+                            return
+                        render_all()
+
+                    def reject_cand(c=cand):
+                        try:
+                            if hasattr(store, "reject_pair_permanently"):
+                                store.reject_pair_permanently(c["before"], c["after"], project_id=project_id)
+                            store.save()
+                        except Exception:
+                            pass
+                        render_all()
+
+                    ctk.CTkButton(
+                        btns, text="加入規則庫", width=100, height=30, corner_radius=10,
+                        fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF",
+                        font=(FONT, 12, "bold"), command=accept_cand,
+                    ).pack(side="left", padx=2)
+                    ctk.CTkButton(
+                        btns, text="忽略", width=64, height=30, corner_radius=10,
+                        fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
+                        font=(FONT, 12, "bold"), command=reject_cand,
+                    ).pack(side="left", padx=2)
+                    row_i += 1
+
+            ctk.CTkLabel(
+                body, text="已儲存規則", text_color=TEXT_ON_DARK, font=(FONT, 14, "bold"), anchor="w",
+            ).grid(row=row_i, column=0, sticky="w", padx=10, pady=(14, 4))
+            row_i += 1
+
+            kw = search_var.get().strip()
+            visible = []
+            project_rules = store.by_project(project_id) if hasattr(store, "by_project") else store.rules
+            for r in project_rules:
+                if r.get("state") == "rejected":
+                    continue
+                if kw and kw not in (r.get("before") or "") and kw not in (r.get("after") or ""):
+                    continue
+                visible.append(r)
+            visible.sort(key=lambda r: (
+                0 if r.get("state", "active") == "active" else 1,
+                -(int(r.get("human_accept_count") or 0) + int(r.get("adopted_count") or 0)),
+                r.get("created_at") or "",
+            ))
+
+            if not visible:
+                ctk.CTkLabel(
+                    body, text="（尚無規則。可用上方「新增詞庫」加入，或等候選出現後確認。）",
+                    text_color=MUTED_ON_DARK, font=(FONT, 13),
+                ).grid(row=row_i, column=0, sticky="w", padx=12, pady=16)
+            for rule in visible:
                 rid = rule.get("id", "")
                 rf = ctk.CTkFrame(body, fg_color="transparent")
-                rf.grid(row=i, column=0, columnspan=5, sticky="ew", padx=8, pady=3)
+                rf.grid(row=row_i, column=0, sticky="ew", padx=8, pady=3)
                 rf.grid_columnconfigure(1, weight=1)
-
-                en_var = ctk.BooleanVar(value=bool(rule.get("enabled", True)))
+                en_var = ctk.BooleanVar(value=bool(rule.get("enabled", True)) and rule.get("state", "active") == "active")
 
                 def on_toggle(rid=rid, var=en_var):
                     store.set_enabled(rid, var.get())
+                    if var.get() and hasattr(store, "set_state"):
+                        store.set_state(rid, "active")
                     try:
                         store.save()
                     except Exception:
@@ -5235,172 +6143,104 @@ class App(ctk.CTk):
                     update_stats()
 
                 ctk.CTkSwitch(
-                    rf,
-                    text="",
-                    variable=en_var,
-                    progress_color=ORANGE,
-                    button_color="#FFFFFF",
-                    button_hover_color="#FFFFFF",
-                    fg_color="#5A5F68",
-                    width=46,
-                    switch_width=44,
-                    switch_height=22,
-                    command=on_toggle,
+                    rf, text="", variable=en_var, progress_color=ORANGE,
+                    button_color="#FFFFFF", button_hover_color="#FFFFFF", fg_color="#5A5F68",
+                    width=46, switch_width=44, switch_height=22, command=on_toggle,
                 ).grid(row=0, column=0, padx=(2, 10), sticky="w")
 
-                tf = ctk.CTkFrame(rf, fg_color="transparent")
-                tf.grid(row=0, column=1, sticky="ew")
-                tf.grid_columnconfigure(0, weight=1)
-                state_tag = "❄ 冷凍" if rule.get("state", "active") == "frozen" else ""
-                tag_text = f"  {state_tag}" if state_tag else ""
+                frozen = rule.get("state", "active") == "frozen"
+                tag = "（已暫停）" if frozen else ""
                 ctk.CTkLabel(
-                    tf,
-                    text=f"「{rule.get('before','')}」  →  「{rule.get('after','')}」{tag_text}",
-                    text_color="#8A92A0" if state_tag else TEXT_ON_DARK,
-                    font=(FONT, 14, "bold"),
-                    anchor="w",
-                ).grid(row=0, column=0, sticky="w")
-                last_used = rule.get("last_used_at") or "—"
-                meta = (
-                    f"領域：{rule.get('domain','通用')}　│　採納 {rule.get('adopted_count',0)} / 拒絕 {rule.get('rejected_count',0)}"
-                    f"　│　建立：{(rule.get('created_at') or '')[:10]}　│　最近使用：{last_used[:10]}"
-                )
-                ctk.CTkLabel(
-                    tf,
-                    text=meta,
-                    text_color=MUTED_ON_DARK,
-                    font=(FONT, 11),
-                    anchor="w",
-                ).grid(row=1, column=0, sticky="w", pady=(2, 0))
-
-                dom_var = ctk.StringVar(value=rule.get("domain", "通用"))
-
-                def on_domain_change(_v=None, rid=rid, var=dom_var):
-                    for r in store.rules:
-                        if r.get("id") == rid:
-                            r["domain"] = var.get()
-                            break
-                    try:
-                        store.save()
-                    except Exception:
-                        pass
-
-                ctk.CTkOptionMenu(
                     rf,
-                    variable=dom_var,
-                    values=domains,
-                    width=98,
-                    fg_color=DARK,
-                    button_color=DARK,
-                    button_hover_color=GARNET,
-                    text_color=TEXT_ON_DARK,
-                    font=(FONT, 12, "bold"),
-                    dropdown_font=(FONT, 12),
-                    command=on_domain_change,
-                ).grid(row=0, column=2, padx=(8, 6), sticky="ne")
+                    text=f"「{rule.get('before', '')}」  →  「{rule.get('after', '')}」{tag}",
+                    text_color="#8A92A0" if frozen else TEXT_ON_DARK,
+                    font=(FONT, 14, "bold"), anchor="w",
+                ).grid(row=0, column=1, sticky="w")
 
-                def on_delete(rid=rid):
-                    if not messagebox.askyesno("刪除規則", f"確定要刪除這條規則？\n「{rule.get('before','')}」→「{rule.get('after','')}」"):
+                def on_delete(rid=rid, rule=rule):
+                    if not messagebox.askyesno(
+                        "刪除規則",
+                        f"確定刪除？\n「{rule.get('before', '')}」→「{rule.get('after', '')}」",
+                        parent=win,
+                    ):
                         return
-                    store.remove(rid)
+                    if not store.remove(rid):
+                        messagebox.showerror("刪除失敗", "找不到要刪除的規則，請重新開啟規則庫。", parent=win)
+                        return
                     try:
                         store.save()
-                    except Exception:
-                        pass
-                    render()
-                    update_stats()
-
-                state_btn_frame = ctk.CTkFrame(rf, fg_color="transparent")
-                state_btn_frame.grid(row=0, column=3, sticky="ne")
-                is_frozen = rule.get("state", "active") == "frozen"
-
-                def on_toggle_state(rid=rid, frozen=is_frozen):
-                    new_state = "active" if frozen else "frozen"
-                    if hasattr(store, "set_state"):
-                        store.set_state(rid, new_state)
+                    except Exception as exc:
+                        # 存檔失敗時恢復磁碟內容，避免畫面看似已刪除、重開後又出現。
                         try:
-                            store.save()
+                            store.load()
                         except Exception:
                             pass
-                        render()
-                        update_stats()
+                        messagebox.showerror(
+                            "刪除失敗",
+                            f"規則未能寫入磁碟，因此沒有刪除。\n\n{exc}",
+                            parent=win,
+                        )
+                        render_all()
+                        return
+                    self.log(
+                        f"個人化規則已刪除：{rule.get('before', '')} → {rule.get('after', '')}",
+                        "success",
+                    )
+                    render_all()
 
-                ctk.CTkButton(
-                    state_btn_frame,
-                    text="解凍" if is_frozen else "冷凍",
-                    width=58,
-                    height=30,
-                    corner_radius=11,
-                    fg_color=DARK,
-                    hover_color=GARNET,
-                    text_color=TEXT_ON_DARK,
-                    font=(FONT, 12, "bold"),
-                    command=on_toggle_state,
-                ).pack(side="left", padx=(0, 4))
+                def on_unfreeze(rid=rid):
+                    if hasattr(store, "unfreeze"):
+                        store.unfreeze(rid)
+                    elif hasattr(store, "set_state"):
+                        store.set_state(rid, "active")
+                        store.set_enabled(rid, True)
+                    try:
+                        store.save()
+                    except Exception:
+                        pass
+                    render_all()
 
+                btnf = ctk.CTkFrame(rf, fg_color="transparent")
+                btnf.grid(row=0, column=2, sticky="e")
+                if frozen:
+                    ctk.CTkButton(
+                        btnf, text="恢復", width=58, height=30, corner_radius=10,
+                        fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
+                        font=(FONT, 12, "bold"), command=on_unfreeze,
+                    ).pack(side="left", padx=(0, 4))
                 ctk.CTkButton(
-                    state_btn_frame,
-                    text="刪除",
-                    width=58,
-                    height=30,
-                    corner_radius=11,
-                    fg_color="#3A2022",
-                    hover_color="#5A2B2F",
-                    text_color=TEXT_ON_DARK,
-                    font=(FONT, 12, "bold"),
-                    command=on_delete,
+                    btnf, text="刪除", width=58, height=30, corner_radius=10,
+                    fg_color="#3A2022", hover_color="#5A2B2F", text_color=TEXT_ON_DARK,
+                    font=(FONT, 12, "bold"), command=on_delete,
                 ).pack(side="left")
+                row_i += 1
 
-                row_widgets.append({"frame": rf})
+        search_var.trace_add("write", lambda *_: render_all())
 
-            if not visible:
-                empty = ctk.CTkLabel(
-                    body,
-                    text="（沒有符合條件的規則）",
-                    text_color=MUTED_ON_DARK,
-                    font=(FONT, 13),
-                )
-                empty.grid(row=0, column=0, padx=12, pady=20, sticky="w")
-                row_widgets.append({"frame": empty})
-
-        def on_filter_changed(*_):
-            render()
-
-        domain_filter_var.trace_add("write", on_filter_changed)
-        search_var.trace_add("write", on_filter_changed)
-        show_frozen_var.trace_add("write", on_filter_changed)
-
-        # ── 底部按鈕 ───────────────────────────────────────
         foot = ctk.CTkFrame(win, fg_color="transparent")
-        foot.grid(row=3, column=0, sticky="ew", padx=24, pady=(0, 16))
+        foot.grid(row=4, column=0, sticky="ew", padx=24, pady=(0, 16))
         foot.grid_columnconfigure(0, weight=1)
 
         def on_enable_all():
-            for r in store.rules:
+            for r in store.by_project(project_id) if hasattr(store, "by_project") else store.rules:
                 r["enabled"] = True
+                if r.get("state") == "frozen":
+                    continue
+                r["state"] = "active"
             try:
                 store.save()
             except Exception:
                 pass
-            render()
-            update_stats()
+            render_all()
 
         def on_disable_all():
-            for r in store.rules:
+            for r in store.by_project(project_id) if hasattr(store, "by_project") else store.rules:
                 r["enabled"] = False
             try:
                 store.save()
             except Exception:
                 pass
-            render()
-            update_stats()
-
-        def on_open_folder():
-            try:
-                rules_path.parent.mkdir(parents=True, exist_ok=True)
-                os.startfile(str(rules_path.parent))
-            except Exception as exc:
-                messagebox.showerror("無法開啟資料夾", str(exc))
+            render_all()
 
         ctk.CTkButton(
             foot, text="全部啟用", width=98, height=36, corner_radius=13,
@@ -5413,54 +6253,12 @@ class App(ctk.CTk):
             font=(FONT, 13, "bold"), command=on_disable_all,
         ).grid(row=0, column=1, sticky="w", padx=(0, 6))
         ctk.CTkButton(
-            foot, text="開啟資料夾", width=110, height=36, corner_radius=13,
-            fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
-            font=(FONT, 13, "bold"), command=on_open_folder,
-        ).grid(row=0, column=2, sticky="w", padx=(0, 6))
-
-        def on_cleanup():
-            if not hasattr(store, "merge_similar"):
-                messagebox.showinfo("無法整理", "目前載入的 personal_rules.py 版本不含整理功能，請更新檔案。")
-                return
-            cap_default = int(getattr(PERSONAL_RULES, "DEFAULT_CAP_PER_DOMAIN", 100))
-            days_default = int(getattr(PERSONAL_RULES, "DEFAULT_FREEZE_DAYS", 90))
-            if not messagebox.askyesno(
-                "整理規則庫",
-                "將執行：\n"
-                f"  ① 自動合併「替換結果相同 + 來源字高相似」的規則\n"
-                f"  ② 將 {days_default} 天未使用的規則冷凍\n"
-                f"  ③ 每個領域只保留採納分數最高的 {cap_default} 條，其餘冷凍\n\n"
-                "冷凍後規則仍會留在檔案，可隨時解凍。要繼續嗎？",
-            ):
-                return
-            merged = store.merge_similar()
-            frozen_old = store.freeze_unused()
-            frozen_cap = store.enforce_domain_cap()
-            try:
-                store.save()
-            except Exception as exc:
-                messagebox.showerror("規則庫存檔失敗", str(exc))
-                return
-            render()
-            update_stats()
-            messagebox.showinfo(
-                "整理完成",
-                f"合併 {merged} 條相似規則\n冷凍 {frozen_old} 條長期未用規則\n冷凍 {frozen_cap} 條超過領域上限的規則",
-            )
-
-        ctk.CTkButton(
-            foot, text="整理規則庫", width=122, height=36, corner_radius=13,
-            fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF",
-            font=(FONT, 13, "bold"), command=on_cleanup,
-        ).grid(row=0, column=3, sticky="w", padx=(0, 6))
-        ctk.CTkButton(
             foot, text="關閉", width=86, height=36, corner_radius=13,
             fg_color="#32333B", hover_color="#45464F", text_color=TEXT_ON_DARK,
             font=(FONT, 13, "bold"), command=win.destroy,
-        ).grid(row=0, column=4, sticky="e")
+        ).grid(row=0, column=2, sticky="e")
 
-        update_stats()
-        render()
+        render_all()
 
     def open_rule_suggestion_dialog(self, parent, candidates: list, store, rules_path):
         """匯出後彈出的「個人化規則建議」視窗（階段 5 輪 A）。"""
@@ -5730,7 +6528,7 @@ class App(ctk.CTk):
         wrote = 0
         if data.get("srt"):
             # 用正規版 chunks_to_srt（剝標點＋自動換行），與第一版 SRT 行為一致
-            Path(data["srt"]).write_text(CORE.chunks_to_srt(after_chunks), encoding="utf-8-sig")
+            self.write_srt_output(data["srt"], after_chunks)
             wrote += 1
         if data.get("txt"):
             Path(data["txt"]).write_text(after_text + "\n", encoding="utf-8-sig")
@@ -5927,11 +6725,37 @@ class App(ctk.CTk):
                 end = start + 2.0
             self.play_srt_segment(data.get("inp", ""), start, end)
 
+        def _tc_for(idx: int) -> tuple[float | None, float | None]:
+            before_chunks = data.get("before_chunks") or []
+            if 0 <= idx < len(before_chunks):
+                ts = before_chunks[idx].get("timestamp") or (None, None)
+                return ts[0], ts[1]
+            return None, None
+
         def accept_current():
             idx = current_review.get("index")
             if idx is None:
                 return
+            before_text = chunk_text(data.get("before_chunks") or [], idx)
+            ai_text = chunk_text(data.get("after_chunks") or [], idx)
+            edited = corrected_box.get("1.0", "end").strip()
             if save_current_text():
+                final = edited or ai_text
+                t0, t1 = _tc_for(idx)
+                # 使用者改過文字 → manual_edit；否則 accept_ai
+                action = "manual_edit" if final != ai_text and final != before_text else "accept_ai"
+                if final == before_text and final != ai_text:
+                    action = "restore_original"
+                record_review_feedback(
+                    action=action,
+                    original_text=before_text,
+                    ai_text=ai_text,
+                    final_text=final,
+                    timecode_start=t0,
+                    timecode_end=t1,
+                    input_path=str(data.get("inp") or ""),
+                    source="quick_compare",
+                )
                 reviewed.add(idx)
                 review_pos["value"] += 1
                 render_diff_list()
@@ -5944,9 +6768,23 @@ class App(ctk.CTk):
             before_chunks = data.get("before_chunks") or []
             after_chunks = data.get("after_chunks") or []
             if 0 <= idx < len(before_chunks) and 0 <= idx < len(after_chunks):
+                before_text = chunk_text(before_chunks, idx)
+                ai_text = chunk_text(after_chunks, idx)
                 # 還原時直接剝標點，讓還原結果與 SRT 輸出一致（無標點）
-                after_chunks[idx]["text"] = CORE.strip_punct_for_srt(chunk_text(before_chunks, idx))
+                restored = CORE.strip_punct_for_srt(before_text)
+                after_chunks[idx]["text"] = restored
                 self.persist_compare_after_chunks()
+                t0, t1 = _tc_for(idx)
+                record_review_feedback(
+                    action="restore_original",
+                    original_text=before_text,
+                    ai_text=ai_text,
+                    final_text=restored,
+                    timecode_start=t0,
+                    timecode_end=t1,
+                    input_path=str(data.get("inp") or ""),
+                    source="quick_compare",
+                )
                 reviewed.add(idx)
                 review_pos["value"] += 1
                 refresh_summary()
@@ -5957,6 +6795,19 @@ class App(ctk.CTk):
             idx = current_review.get("index")
             if idx is None:
                 return
+            before_text = chunk_text(data.get("before_chunks") or [], idx)
+            ai_text = chunk_text(data.get("after_chunks") or [], idx)
+            t0, t1 = _tc_for(idx)
+            record_review_feedback(
+                action="skip",
+                original_text=before_text,
+                ai_text=ai_text,
+                final_text=ai_text,
+                timecode_start=t0,
+                timecode_end=t1,
+                input_path=str(data.get("inp") or ""),
+                source="quick_compare",
+            )
             reviewed.add(idx)
             review_pos["value"] += 1
             load_review_item()
@@ -6071,7 +6922,7 @@ class App(ctk.CTk):
         count = 0
         if data.get("srt"):
             # 用正規版 chunks_to_srt（剝標點＋自動換行），與第一版 SRT 行為一致
-            Path(data["srt"]).write_text(CORE.chunks_to_srt(data["before_chunks"]), encoding="utf-8-sig")
+            self.write_srt_output(data["srt"], data["before_chunks"])
             count += 1
         if data.get("txt"):
             Path(data["txt"]).write_text((data.get("before_text") or "") + "\n", encoding="utf-8-sig")
@@ -6079,8 +6930,233 @@ class App(ctk.CTk):
         self.log(f"已還原 {count} 個輸出檔案為原始辨識。", "warn")
         messagebox.showinfo("已還原", f"已還原 {count} 個輸出檔案。")
 
+    # ── v2.4：外部 SRT／專案／學習／模板／實驗 ─────────────────
 
-# 2026-07-10：還原寫檔改用 chunks_to_srt（剝標點＋換行）、新增連續重複幻覺過濾
+    def open_external_srt(self):
+        """直接開啟外部 SRT（不必先跑轉寫）。可選對應媒體以播放／波形。"""
+        srt_path = filedialog.askopenfilename(
+            title="開啟外部 SRT",
+            filetypes=[("SRT 字幕", "*.srt"), ("所有檔案", "*.*")],
+        )
+        if not srt_path:
+            return
+        try:
+            payload = Path(srt_path).read_text(encoding="utf-8-sig")
+            chunks = strip_chunks_for_srt_display(parse_srt_text(payload))
+        except Exception as exc:
+            messagebox.showerror("讀取失敗", f"無法解析 SRT：\n{exc}")
+            return
+        if not chunks:
+            messagebox.showinfo("沒有字幕", "此 SRT 沒有可解析的字幕段落。")
+            return
+        media = filedialog.askopenfilename(
+            title="選擇對應影音（可取消略過）",
+            filetypes=[
+                ("影音", " ".join(f"*{e}" for e in sorted(MEDIA_EXTS))),
+                ("所有檔案", "*.*"),
+            ],
+        )
+        result = {
+            "inp": media or srt_path,
+            "srt": srt_path,
+            "txt": "",
+            "chunks": clone_chunks(chunks),
+            "external": True,
+        }
+        self.last_result = result
+        if not getattr(self, "batch_results", None):
+            self.batch_results = []
+        self.batch_results.append(result)
+        self.srt_editor_btn.configure(state="normal")
+        self.result_label.configure(text=f"外部 SRT：{Path(srt_path).name}｜{len(chunks)} 組")
+        self.log(f"已載入外部 SRT：{srt_path}（{len(chunks)} 組）", "success")
+        self.open_srt_editor()
+
+    def _project_button_label(self) -> str:
+        """膠囊／細長條上的專案名；未選時寫「預設」。"""
+        if PROJECT_PROFILES is not None:
+            try:
+                act = PROJECT_PROFILES.get_active()
+                if act and act.get("name"):
+                    name = str(act.get("name")).strip()
+                    if len(name) > 36:
+                        name = name[:36] + "…"
+                    return f"▸ {name}"
+            except Exception:
+                pass
+        return "▸ 預設（可選）"
+
+    def refresh_project_label(self):
+        label = self._project_button_label()
+        try:
+            if hasattr(self, "project_btn") and self.project_btn is not None:
+                self.project_btn.configure(text=label)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "project_strip_label") and self.project_strip_label is not None:
+                self.project_strip_label.configure(text=self._project_strip_text())
+        except Exception:
+            pass
+
+    def open_project_profiles_window(self, parent=None):
+        if not has_feature("project_profiles") and not has_feature("custom_rules"):
+            self.show_supporter_message("project_profiles")
+            return
+        if PROJECT_PROFILES is None:
+            messagebox.showinfo("無法開啟", "專案模組未載入。")
+            return
+        anchor = parent or self
+        win = ctk.CTkToplevel(anchor)
+        win.title("選擇專案")
+        win.geometry("560x440")
+        win.configure(fg_color=BLACK_KITE)
+        win.transient(anchor)
+        win.grab_set()
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            win,
+            text="選擇這次要用的專案",
+            text_color=TEXT_ON_DARK,
+            font=(FONT, 18, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=20, pady=(16, 4))
+        ctk.CTkLabel(
+            win,
+            text="記憶個人化規則、固定用語、受訪者等，方便在不同專案間切換。",
+            text_color=MUTED_ON_DARK,
+            font=(FONT, 12),
+            wraplength=500,
+            justify="left",
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=20, pady=(40, 8))
+
+        body = ctk.CTkScrollableFrame(win, fg_color=CARD_DARK)
+        body.grid(row=1, column=0, sticky="nsew", padx=20, pady=8)
+        body.grid_columnconfigure(0, weight=1)
+
+        def render():
+            for child in body.winfo_children():
+                child.destroy()
+            profiles = PROJECT_PROFILES.profiles
+            if not profiles:
+                ctk.CTkLabel(
+                    body, text="尚無專案，請按下方「新增」。",
+                    text_color=MUTED_ON_DARK, font=(FONT, 13),
+                ).grid(row=0, column=0, sticky="w", padx=8, pady=12)
+                return
+            active = PROJECT_PROFILES.active_id
+            for i, p in enumerate(profiles):
+                row = ctk.CTkFrame(body, fg_color=DARK_2, corner_radius=10)
+                row.grid(row=i, column=0, sticky="ew", padx=4, pady=4)
+                mark = "● " if p.get("id") == active else "○ "
+                ctk.CTkLabel(
+                    row,
+                    text=f"{mark}{p.get('name')}",
+                    text_color=TEXT_ON_DARK,
+                    font=(FONT, 14, "bold"),
+                    anchor="w",
+                ).pack(side="left", padx=12, pady=10)
+                ctk.CTkButton(
+                    row, text="選用", width=64, height=30, corner_radius=10,
+                    fg_color=ORANGE, hover_color=ORANGE_DARK,
+                    text_color="#FFFFFF", font=(FONT, 12, "bold"),
+                    command=lambda pid=p.get("id"): _activate(pid),
+                ).pack(side="right", padx=8)
+
+        def _activate(pid):
+            PROJECT_PROFILES.set_active(pid)
+            PROJECT_PROFILES.save()
+            self.refresh_project_label()
+            # 選完收成細長條
+            self.set_project_bar_expanded(False)
+            win.destroy()
+
+        def add_profile():
+            name = simple_prompt(win, "專案名稱（例如節目名）")
+            if not name:
+                return
+            guests = simple_prompt(win, "固定用語／受訪者（可空白）") or ""
+            profile = PROJECT_PROFILES.upsert(
+                name=name, series_name=name, domain="通用", guests=guests, terms=guests,
+            )
+            PROJECT_PROFILES.set_active(profile.get("id") or "")
+            PROJECT_PROFILES.save()
+            self.refresh_project_label()
+            self.set_project_bar_expanded(False)
+            win.destroy()
+
+        def _clear():
+            PROJECT_PROFILES.set_active("")
+            PROJECT_PROFILES.save()
+            self.refresh_project_label()
+            # 清回預設後展開說明，方便再選
+            self.set_project_bar_expanded(True)
+            render()
+
+        foot = ctk.CTkFrame(win, fg_color="transparent")
+        foot.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 16))
+        ctk.CTkButton(
+            foot, text="新增", width=90, height=36, corner_radius=12,
+            fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF",
+            font=(FONT, 13, "bold"), command=add_profile,
+        ).pack(side="left")
+        ctk.CTkButton(
+            foot, text="清除選用", width=100, height=36, corner_radius=12,
+            fg_color=DARK, hover_color=GARNET, text_color=TEXT_ON_DARK,
+            font=(FONT, 13, "bold"), command=_clear,
+        ).pack(side="left", padx=8)
+        ctk.CTkButton(
+            foot, text="關閉", width=90, height=36, corner_radius=12,
+            fg_color="#32333B", hover_color="#45464F", text_color=TEXT_ON_DARK,
+            font=(FONT, 13, "bold"), command=win.destroy,
+        ).pack(side="right")
+        render()
+
+
+def simple_prompt(parent, title: str, default: str = "") -> str | None:
+    """簡易單行輸入對話框。"""
+    dialog = ctk.CTkToplevel(parent)
+    dialog.title(title)
+    dialog.geometry("420x160")
+    dialog.configure(fg_color=BLACK_KITE)
+    dialog.transient(parent)
+    dialog.grab_set()
+    var = ctk.StringVar(value=default)
+    ctk.CTkLabel(dialog, text=title, text_color=TEXT_ON_DARK, font=(FONT, 14, "bold")).pack(
+        anchor="w", padx=16, pady=(16, 8)
+    )
+    entry = ctk.CTkEntry(
+        dialog, textvariable=var, height=36, width=360,
+        fg_color=DARK_2, border_color=LINE, text_color=TEXT_ON_DARK, font=(FONT, 13),
+    )
+    entry.pack(padx=16)
+    entry.focus_set()
+    result = {"value": None}
+
+    def ok():
+        result["value"] = var.get().strip()
+        dialog.destroy()
+
+    def cancel():
+        result["value"] = None
+        dialog.destroy()
+
+    row = ctk.CTkFrame(dialog, fg_color="transparent")
+    row.pack(fill="x", padx=16, pady=14)
+    ctk.CTkButton(
+        row, text="確定", width=90, fg_color=ORANGE, hover_color=ORANGE_DARK,
+        text_color="#FFFFFF", font=(FONT, 13, "bold"), command=ok,
+    ).pack(side="right")
+    ctk.CTkButton(
+        row, text="取消", width=90, fg_color=DARK, hover_color=GARNET,
+        text_color=TEXT_ON_DARK, font=(FONT, 13, "bold"), command=cancel,
+    ).pack(side="right", padx=8)
+    dialog.bind("<Return>", lambda _e: ok())
+    dialog.wait_window()
+    return result["value"]
+
+# 2026-07-14：v2.4 學習閉環、專案範圍、外部 SRT、下載體驗、模板詞庫、效能實驗
 if __name__ == "__main__":
     enable_dpi_awareness()
     set_app_user_model_id()

@@ -7,6 +7,7 @@ Set-Location $Root
 
 $Release = Join-Path $Root "release"
 $LogDir = Join-Path $Root "logs"
+$ForbiddenPackageDirectories = @("test_footage")
 New-Item -ItemType Directory -Force -Path $Release, $LogDir | Out-Null
 $Log = Join-Path $LogDir "build_main_zip.log"
 
@@ -25,9 +26,17 @@ function Write-CleanConfig {
         use_llm = $false
         use_text_fix = $true
         txt_diarization_enabled = $false
+        srt_diarization_enabled = $false
         diarization_num_speakers = 3
+        srt_max_chars_per_line = ""
         output_srt_enabled = $true
         output_txt_enabled = $false
+        use_personal_rules = $true
+        personal_rules_domain = "通用"
+        use_domain_prompt = $true
+        prompt_template_domain = "通用"
+        use_custom_dictionary = $true
+        use_project_context = $true
     }
     $cfg | ConvertTo-Json | Set-Content -Encoding UTF8 $Path
 }
@@ -110,6 +119,9 @@ Copy-IfExists $MainPy.FullName (Join-Path $AppDir "SanWich.py")
 Copy-IfExists (Join-Path $Root "core\SanWich_legacy_core.py") (Join-Path $AppCore "SanWich_legacy_core.py")
 Copy-IfExists (Join-Path $Root "core\diarization.py") (Join-Path $AppCore "diarization.py")
 Copy-IfExists (Join-Path $Root "core\personal_rules.py") (Join-Path $AppCore "personal_rules.py")
+Copy-IfExists (Join-Path $Root "core\learning.py") (Join-Path $AppCore "learning.py")
+Copy-IfExists (Join-Path $Root "core\prompt_templates.py") (Join-Path $AppCore "prompt_templates.py")
+Copy-IfExists (Join-Path $Root "core\experiments.py") (Join-Path $AppCore "experiments.py")
 Copy-IfExists (Join-Path $Root "core\features.py") (Join-Path $AppCore "features.py")
 Copy-IfExists (Join-Path $Root "core\license_manager.py") (Join-Path $AppCore "license_manager.py")
 Copy-IfExists $SetupBat.FullName (Join-Path $AppDir "setup_internal.bat")
@@ -270,6 +282,16 @@ if (Test-Path -LiteralPath $Zip) {
     $Zip = Join-Path $Release "${ZipBaseName}_$Stamp.zip"
     "Existing $ZipBaseName.zip found; writing $Zip instead." | Add-Content -Encoding UTF8 $Log
 }
+
+foreach ($directoryName in $ForbiddenPackageDirectories) {
+    $forbiddenPaths = Get-ChildItem -LiteralPath $Stage -Directory -Recurse -Force |
+        Where-Object { $_.Name -ieq $directoryName }
+    if ($forbiddenPaths) {
+        throw "Copyrighted local test footage must not be packaged: $($forbiddenPaths.FullName -join ', ')"
+    }
+}
+"Copyrighted local test footage: excluded" | Add-Content -Encoding UTF8 $Log
+
 Compress-Archive -Path $Stage -DestinationPath $Zip
 
 $Summary = [pscustomobject]@{

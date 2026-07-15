@@ -28,6 +28,9 @@ datas = [
     ('core/features.py', 'core'),
     ('core/license_manager.py', 'core'),
     ('core/personal_rules.py', 'core'),
+    ('core/learning.py', 'core'),
+    ('core/prompt_templates.py', 'core'),
+    ('core/experiments.py', 'core'),
     ('core/diarization.py', 'core'),
     # 安全：絕不打包含真實 API Key 的 config.json；缺檔時程式會用預設值自動重建
     ('config.example.json', '.'),

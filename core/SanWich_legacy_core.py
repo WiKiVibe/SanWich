@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 import webbrowser
 from pathlib import Path
@@ -46,7 +47,10 @@ BREEZE_MODEL_ID = "MediaTek-Research/Breeze-ASR-25"
 # ── 介面常數 ─────────────────────────────────────────────
 FONT_FAMILY    = "Microsoft JhengHei UI"
 SEGMENT_SECONDS = 60
+# wrap_srt_text 的相容預設仍保留 15，避免既有呼叫把完整片語過度拆短；
+# 實際 SRT 匯出另用較短的 spoken-beat 目標，再做語意柔性合併。
 SRT_MAX_LINE_WIDTH = 15.0
+SRT_TARGET_LINE_WIDTH = 13.0
 MEDIA_EXTS = {".mp3", ".wav", ".m4a", ".mp4", ".mov", ".mkv", ".flac", ".aac", ".ogg", ".webm"}
 MEDIA_FILETYPES = [("媒體檔案", "*.mp3 *.wav *.m4a *.mp4 *.mov *.mkv *.flac *.aac *.ogg *.webm"),
                    ("所有檔案", "*.*")]
@@ -65,27 +69,28 @@ ERROR        = "#F87171"
 WARN         = "#FBBF24"
 ENTRY_BG     = "#0F151C"
 
-# ── 總編輯 Prompt（SRT 結構鎖死版）─────────────────────────
+# ── 總編輯 Prompt（只校字；斷句交給本機語意後處理）─────────────
 EDITOR_SYSTEM_PROMPT = (
     "你是一個台灣電視節目的字幕總編輯。我會提供你一段標準的 SRT 字幕檔案。\n"
     "你的任務是校正辨識錯字與專有名詞，讓字幕自然、準確、可播出；不要重寫成摘要。"
     "標點符號僅在明顯錯誤時才修改，不要為了風格或個人偏好重排標點。\n\n"
-    "【鋼鐵律令：時間碼框架絕對鎖死，文字允許流動】\n"
+    "【鋼鐵律令：時間碼框架絕對鎖死，這一輪只校正文字】\n"
     "1. 「序號」與「時間碼」（例如 00:01:23,456 --> 00:01:25,123）是不可觸碰的底線。輸入有幾組，輸出就必須有幾組，絕對不可刪除、合併或修改時間碼。\n"
-    "2. 「文字內容」是流動的。你可以為了語意通順，將文字跨組搬移到上一組或下一組，只要確保「時間碼與序號」的框架原封不動即可。\n"
+    "2. 每組文字必須留在原本的時間碼內；不要把文字跨組搬到上一組或下一組。本機程式會在校字完成後另做語意斷句。\n"
     "3. 如果某一行整句都是無意義的重複字（如：喔喔喔喔）或 AI 幻覺，請「保留序號與時間碼」，只將下方的文字直接「刪除留空」，絕對不可以把那一組時間碼整塊刪掉！\n\n"
     "【文字清洗與校對規則】\n"
     "1. 修正台灣國語與台語錯別字。\n"
     "2. 【「姐」與「姊」的嚴格區分】：口語中的尊稱、稱呼（如：長輩、同事、熟人、車友），一律使用「姐姐」、「姐」。除非上下文明確指出對方是「有血緣關係的親生姊姊」，才可以使用女字旁的「姊姊」、「姊」。\n"
-    "3. 只刪除明顯不影響語意的口水詞與重複語氣詞（如：嗯、啊、喔、那個、就是、對對對、然後然後）。如果刪除後會讓原意變短、變弱或少掉資訊，請保留原句。\n"
+    "3. 保留會影響語氣、立場或人物個性的語助詞與口語停頓詞（如：嗯、啊、喔、呢、吧）。同一組內若『就是、那個、然後、有在、因為』只是重複起頭、口吃或不承載資訊，可適度刪除；但不得刪掉事實、例子、程度、否定或說話者態度。\n"
     "4. 嚴禁把逐字稿改寫成精簡摘要；不得自行濃縮、合併重點、刪掉細節、改變說話者語氣或新增原文沒有的內容。\n"
     "5. 儘量維持原字幕字數與資訊量。除了明顯錯字、斷句、專有名詞與無意義贅詞外，不要大幅縮短句子。\n"
     "6. 數字統一為阿拉伯數字（二零二六→2026）。英文專有名詞統一常用大小寫（AI、API、DaVinci）。人稱指人類用「他」，指非人類（軟體、摩托車、系統）一律用「它」。\n"
-    "7. 【中文語意斷句】請先理解整個子句，再決定跨組搬字；不要把每個詞當成獨立規則。修飾語與中心詞、介詞與受詞、連接詞與後接子句、否定／程度副詞與謂語、姓名與稱謂、數字與單位、完整英文詞組必須盡量留在同一組。優先在完整語意單位之後，或在下一個轉折／承接子句之前換組；避免把『因為、所以、但是、然後、或是、如果、把、被、的、很』這類尚未完成語意的成分孤零零留在行尾。\n"
+    "7. 這一輪不要自行重切、合併或跨組重排字幕；只修正各時間碼內的文字。本機斷句器會另外保護修飾語與中心詞、介詞與受詞、連接詞與後接子句、姓名與稱謂、數字與單位及完整英文詞組。\n"
     "8. 【中英數空格】中文與單一英文詞、縮寫、阿拉伯數字相鄰時不加空格（如『聊Podcast』『使用Threads』『澳幣7.99』）；英文片語內原有的單字空格要保留。小數、日期、時間、版本號、數字範圍內不得插入空格；只有兩個獨立數值並列且沒有標點可用時，才用一個空格避免黏成另一個數字。\n"
     "9. 專有名詞請依照台灣官方或常用譯名，或依照官方網站、新聞媒體、維基百科等可靠來源為準。\n"
-    "10. 每組字幕一行不超過15個中文字寬；需要跨組重排時，以語意完整優先於左右字數完全平均。輸出不要加入一般標點，但數字內的小數點、日期／時間分隔、版本號與範圍符號必須保留。\n"
+    "10. 不要為了湊固定字數而刪字、補字或跨時間碼搬字。輸出不要加入一般標點，但數字內的小數點、日期／時間分隔、版本號與範圍符號必須保留。\n"
     "11. 請主動將中國大陸用語改為台灣慣用語，例如『視頻→影片』『軟件→軟體』『信息→資訊／訊息』『鼠標→滑鼠』『打印→列印』『外賣→外送』『快遞→宅配』『公交→公車』『地鐵→捷運』『出租車→計程車』『酒店→飯店』『質量→品質』。請依上下文判斷，不要機械式替換，並避免不符合台灣語感的句式。\n\n"
+    "12. 【全文專名一致性】先從本批上下文辨認人名、品牌、產品與服務名稱；同一對象的拼法必須一致並採官方寫法。依上下文明確談論 AI 服務時，應辨別 Claude／Cloud、Grok／Grock 這類近音誤辨，不可把專名改成普通英文單字。\n\n"
     "輸出格式：直接輸出校對完成後的標準 SRT 內容，嚴禁添加任何額外的解釋與說明。"
 )
 
@@ -98,6 +103,31 @@ TEXT_FIX_PROMPT = (
 SRT_FORMAT_ONLY_PROMPT = (
     "你是 SRT 字幕格式助手。請嚴格保留輸入的序號與時間碼，不可刪除、合併、重新排序或修改任何時間碼。\n"
     "若沒有其他明確修改指令，請盡量保留字幕文字原樣，只維持標準 SRT 格式並直接輸出結果，不要添加解釋。"
+)
+
+SEMANTIC_SEGMENTATION_PROMPT = (
+    "你是台灣影片剪輯師的口播字幕斷句器。你不是在分析書面文法，而是在找觀眾一眼能讀完的口語意群與說話拍點。\n"
+    "先通讀整段、比較所有可能切點，再選擇整體最自然的組合；不要沿用輸入原本的字幕分段。\n"
+    "每個切點的左右兩側，都應該能各自成為自然、可獨立呈現的口語拍點。若前段只是下一段的主詞、受詞、名詞片語或必要條件，請改找附近更自然的切點。\n"
+    "注意時間狀語、話題、主詞、謂語、引述、轉折、重複起頭與新動作的口語拍點。不要只追求書面文法完整，也不要為了句子短而拆散同一個意群。\n"
+    "一個意群過長時，可在內部轉折、重複起頭、新動作或新主詞之前切開。常態約 10 至 22 個中文字寬，優先落在 12 至 18 字寬；語意完整的一句即使稍長也不要硬拆。七字寬以下的短段只有在能獨立形成明確轉折、問答或強調拍點時才保留，否則應與相鄰意群合併。當多種切法都自然時，選擇切點較少的組合。\n"
+    "你只能重新分段，不得增加、刪除、替換任何字，也不得改變字序或英文空格。輸入即使有錯字、口誤、贅詞或不自然的英數格式，也必須逐字原樣保留，絕對不要順手校正。\n"
+    "只回傳 JSON，格式必須是：{\"segments\":[\"...\",\"...\"]}\n\n"
+    "【剪輯風格範例一】\n"
+    "輸入：我請Siri AI幫我做了一張生日賀卡它居然就直接給我這個這個是逼著我送iPhone當生日禮物還是怎樣它還跟我說它保留了原本的設計\n"
+    "輸出：{\"segments\":[\"我請Siri AI\",\"幫我做了一張生日賀卡\",\"它居然就直接給我這個\",\"這個是逼著我送iPhone\",\"當生日禮物還是怎樣\",\"它還跟我說\",\"它保留了原本的設計\"]}\n\n"
+    "【剪輯風格範例二】\n"
+    "輸入：每個題結束之後我會給一個排名最後算一個平均分\n"
+    "輸出：{\"segments\":[\"每個題結束之後\",\"我會給一個排名\",\"最後算一個平均分\"]}\n\n"
+    "【剪輯風格範例三】\n"
+    "輸入：很多人原本在等這個返校季的優惠打算等這個BTS開跑來入手一台MacBook買得稍微划算一點結果等到的卻是這個全線的漲價更誇張的就是這個教育商店的價格也都跟著水漲船高了我相信很多人心裡肯定是很不爽的\n"
+    "輸出：{\"segments\":[\"很多人原本在等這個返校季的優惠\",\"打算等這個BTS開跑\",\"來入手一台MacBook\",\"買得稍微划算一點\",\"結果等到的卻是這個全線的漲價\",\"更誇張的就是\",\"這個教育商店的價格也都跟著水漲船高了\",\"我相信很多人心裡肯定是很不爽的\"]}\n\n"
+    "【剪輯風格範例四】\n"
+    "輸入：Apple未來這兩年的產品線更新的時程幾乎都已經攤開在桌面上了目前根據分析師的預測這個記憶體的價格可能會等到2027年才會達到一個最高峰之後才會開始出現緩解\n"
+    "輸出：{\"segments\":[\"Apple未來這兩年的產品線更新的時程\",\"幾乎都已經攤開在桌面上了\",\"目前根據分析師的預測\",\"這個記憶體的價格可能會等到2027年\",\"才會達到一個最高峰\",\"之後才會開始出現緩解\"]}\n\n"
+    "【剪輯風格範例五】\n"
+    "輸入：漲價已經變成事實了沒辦法逆轉了在看每一台之前我就先回答一個問題\n"
+    "輸出：{\"segments\":[\"漲價已經變成事實了沒辦法逆轉了\",\"在看每一台之前我就先回答一個問題\"]}"
 )
 
 # ── 設定檔路徑 ────────────────────────────────────────────
@@ -420,10 +450,12 @@ _CLAUSE_STARTERS = (
     "因為", "所以", "但是", "可是", "不過", "然而", "然後", "而且", "如果", "假如",
     "雖然", "其實", "另外", "接著", "結果", "至於", "就是", "還有", "或是", "以及",
 )
-_CLAUSE_TAKING_VERBS = ("覺得", "認為", "以為", "知道", "發現", "希望", "相信", "聽說", "看到", "想說")
+_CLAUSE_TAKING_VERBS = ("覺得", "認為", "以為", "知道", "發現", "希望", "相信", "聽說", "看到", "想說", "叫", "讓")
 _BOUND_LEFT = set("的地得把被跟與和或在從對向為讓將就才也都還很最更沒不再正")
 _WEAK_LEFT_POS = {"p", "c", "d", "uj", "uv", "ul", "uz", "m", "q"}
-_WEAK_RIGHT_POS = {"p", "uj", "uv", "ul", "uz", "y"}
+_WEAK_RIGHT_POS = {"p", "uj", "uv", "ug", "ul", "uz", "y"}
+_FORBIDDEN_SRT_STARTS = ("的", "地", "得", "過", "著", "了")
+_PROTECTED_SRT_WORDS = ("誇張", "視訊", "資訊")
 
 
 def _boundary_linguistic_cost(left: str, right: str, left_pos: str = "", right_pos: str = "") -> float:
@@ -435,12 +467,20 @@ def _boundary_linguistic_cost(left: str, right: str, left_pos: str = "", right_p
         score += 18.0
     if right_pos in _WEAK_RIGHT_POS:
         score += 18.0
+    # 絕對不要產生「見｜過」「誇張｜的一次」這類切點。
+    if right.startswith(_FORBIDDEN_SRT_STARTS):
+        score += 80.0
     if right.startswith(("很", "最", "更", "非常", "太", "不", "沒")):
         score += 14.0
     if right_pos == "c" or right.startswith(_CLAUSE_STARTERS):
         score -= 16.0
+    # 單獨的「我覺得｜主句」可作口語節奏切點；但「如果你覺得｜...」
+    # 還在條件子句內，後半是必要內容，不能沿用同一個加分規則。
     if left.endswith(_CLAUSE_TAKING_VERBS) and right_pos[:1] in {"m", "n", "r"}:
-        score -= 22.0
+        if left.startswith(("如果", "假如", "假設", "只要", "當你", "當他", "當她")):
+            score += 22.0
+        else:
+            score -= 22.0
     if left_pos[:1] == "n" and right_pos[:1] == "n":
         score += 10.0
     if left.endswith(("呢", "嗎", "吧", "啦", "啊", "喔", "耶")):
@@ -529,54 +569,214 @@ def wrap_srt_text(text: str, max_width: float = SRT_MAX_LINE_WIDTH) -> list[str]
     return [ln for ln in lines if ln] or [text]
 
 
-def chunks_to_srt(chunks: list[dict]) -> str:
+_GOOD_SENTENCE_ENDINGS = ("呢", "嗎", "吧", "啦", "啊", "喔", "呀", "嘛", "耶")
+_INCOMPLETE_NOMINAL_ENDINGS = ("一個", "這個", "那個", "有關", "所謂", "其中", "包括")
+_INCOMPLETE_MODAL_ENDINGS = (
+    "能不能", "會不會", "可不可以", "要不要", "想不想", "需不需要",
+    "我要", "你要", "他要", "她要", "它要",
+    "我是", "你是", "他是", "她是", "它是",
+    "讓我", "讓你", "讓他", "讓她", "讓它",
+    "就是我", "就是你", "就是他", "就是她", "就是它",
+    "有在", "正在", "還在", "就直接", "才可以", "都可以",
+)
+_COMPLEMENT_TAKING_ENDINGS = ("要求", "規定", "方法", "方式", "字倒")
+_COMPLEMENT_STARTERS = ("去", "來", "做", "進行", "把", "被", "是")
+
+
+def _join_srt_text(left: str, right: str) -> str:
+    """合併兩個相鄰 spoken beat，保護英文片語原本需要的空格。"""
+    left = (left or "").rstrip()
+    right = (right or "").lstrip()
+    sep = ""
+    if left[-1:].isascii() and right[:1].isascii() and left[-1:].isalnum() and right[:1].isalnum():
+        sep = " "
+    return normalize_subtitle_spacing(left + sep + right)
+
+
+def _should_merge_srt_boundary(left: str, right: str) -> bool:
+    """判斷目前切點是否把一個必要語法單位硬切成兩半。"""
+    left = (left or "").strip()
+    right = (right or "").strip()
+    if not left or not right:
+        return False
+    # 連接詞開頭與明確句尾語氣通常是自然 spoken beat；必須放在斷詞
+    # 檢查之前，避免 jieba 偶發誤判而把「了｜然後」重新黏回去。
+    if right.startswith(_CLAUSE_STARTERS) or left.endswith(_GOOD_SENTENCE_ENDINGS):
+        return False
+    if right.startswith(_FORBIDDEN_SRT_STARTS):
+        return True
+    boundary_probe = left[-4:] + right[:4]
+    boundary_at = len(left[-4:])
+    for word in _PROTECTED_SRT_WORDS:
+        start = boundary_probe.find(word)
+        if start >= 0 and start < boundary_at < start + len(word):
+            return True
+    if left.endswith(("A", "B")) and right.startswith("段班"):
+        return True
+    if left.endswith("公共") and right.lower().startswith(("wifi", "wi-fi")):
+        return True
+    if srt_text_width(left) <= 10.0 and right.startswith(("和", "與")):
+        return True
+    if left.endswith(_INCOMPLETE_MODAL_ENDINGS):
+        return True
+    if left.endswith(_COMPLEMENT_TAKING_ENDINGS) and right.startswith(_COMPLEMENT_STARTERS):
+        return True
+    if _HAS_JIEBA:
+        # 重新把邊界附近合起來斷詞；如果目前切點落在 jieba 詞內，代表
+        # Breeze／前一輪切段把「視｜訊」這類完整詞拆開了。
+        left_tail = left[-8:]
+        right_head = right[:8]
+        probe = left_tail + right_head
+        boundary = len(left_tail)
+        positions = set()
+        cursor = 0
+        for item in jieba_posseg.cut(probe):
+            cursor += len(item.word)
+            positions.add(cursor)
+        if boundary not in positions:
+            return True
+    if left.endswith(_CLAUSE_TAKING_VERBS + _INCOMPLETE_NOMINAL_ENDINGS):
+        return True
+    # 其它詞性只參與 wrap_srt_text 的切點評分；不要在這裡大範圍回黏，
+    # 否則會把快速口語需要的短 spoken beats 再度合成長句。
+    return False
+
+
+LAST_SRT_SEGMENTATION_META: dict = {}
+
+
+def validate_and_repair_srt_segmentation(entries: list[dict], target: float) -> tuple[list[dict], int]:
+    """在整份字幕完成後，重新掃描高信心的不完整切點。
+
+    這一輪完全在本機執行，不重送 AI。只合併時間相鄰、總長不超過目標
+    加六字，且明確屬於未完成語法或三字以下孤兒段的字幕；時間範圍取兩段
+    的聯集，因此不改變全片起訖與字幕順序。
+    """
+    repaired = [
+        {"text": (entry.get("text") or "").strip(), "timestamp": tuple(entry.get("timestamp") or (0.0, 0.0))}
+        for entry in entries if (entry.get("text") or "").strip()
+    ]
+    repair_count = 0
+    semantic_limit = min(22.0, max(target + 6.0, target * 2.0))
+    for _pass in range(3):
+        changed = False
+        merged: list[dict] = []
+        for entry in repaired:
+            if merged:
+                prev = merged[-1]
+                prev_start, prev_end = prev["timestamp"]
+                cur_start, cur_end = entry["timestamp"]
+                combined = _join_srt_text(prev["text"], entry["text"])
+                orphan_boundary = (
+                    min(srt_text_width(prev["text"]), srt_text_width(entry["text"])) <= 3.0
+                    and not entry["text"].startswith(_CLAUSE_STARTERS)
+                    and not prev["text"].endswith(_GOOD_SENTENCE_ENDINGS)
+                )
+                should_repair = _should_merge_srt_boundary(prev["text"], entry["text"]) or orphan_boundary
+                if (
+                    should_repair
+                    and cur_start - prev_end <= 0.16
+                    and cur_end - prev_start <= 5.6
+                    and srt_text_width(combined) <= semantic_limit
+                ):
+                    prev["text"] = combined
+                    prev["timestamp"] = (prev_start, cur_end)
+                    repair_count += 1
+                    changed = True
+                    continue
+            merged.append({"text": entry["text"], "timestamp": tuple(entry["timestamp"])})
+        repaired = merged
+        if not changed:
+            break
+    return repaired, repair_count
+
+
+def resegment_chunks_for_srt(chunks: list[dict], max_line_width: float | None = None) -> list[dict]:
+    """先依目標寬度拆分，再合併語法上明顯不完整的切點。
+
+    ``max_line_width`` 是一般閱讀節奏目標，不再是凌駕語意的硬上限；
+    若切點會留下懸空的動詞、修飾語或介詞，允許合併到約兩倍目標寬度。
+    """
+    try:
+        target = float(max_line_width) if max_line_width is not None else float(SRT_TARGET_LINE_WIDTH)
+    except Exception:
+        target = float(SRT_TARGET_LINE_WIDTH)
+    target = max(6.0, min(40.0, target))
+
+    split_entries: list[dict] = []
+    for chunk in chunks:
+        text = strip_punct_for_srt((chunk.get("text") or "").strip())
+        ts = chunk.get("timestamp") or (0.0, 0.0)
+        if not text:
+            continue
+        start = float(ts[0] if ts[0] is not None else 0.0)
+        end = float(ts[1] if ts[1] is not None else start + 2.0)
+        if end <= start:
+            end = start + 2.0
+        lines = wrap_srt_text(text, max_width=target) or [text]
+        widths = [max(0.1, srt_text_width(line)) for line in lines]
+        total_width = sum(widths)
+        current_start = start
+        for line_i, (line, width) in enumerate(zip(lines, widths)):
+            line_end = end if line_i == len(lines) - 1 else current_start + (end - start) * width / total_width
+            split_entries.append({"text": line, "timestamp": (current_start, line_end)})
+            current_start = line_end
+
+    if not split_entries:
+        return []
+
+    # AI 與初次逐段切分全部完成後，再用完整時間軸做一次本機斷句體檢。
+    repaired, repair_count = validate_and_repair_srt_segmentation(split_entries, target)
+    global LAST_SRT_SEGMENTATION_META
+    LAST_SRT_SEGMENTATION_META = {
+        "input_count": len(chunks),
+        "split_count": len(split_entries),
+        "output_count": len(repaired),
+        "repair_count": repair_count,
+        "target_width": target,
+        "local_full_pass": True,
+    }
+    return repaired
+
+
+def chunks_to_srt(chunks: list[dict], max_line_width: float | None = None) -> str:
+    """匯出 SRT。max_line_width 是一般目標寬度，語意不完整時可柔性延長。"""
     entries = []
+    idx = 1
+    for chunk in resegment_chunks_for_srt(chunks, max_line_width=max_line_width):
+        text = (chunk.get("text") or "").strip()
+        start, end = chunk.get("timestamp") or (0.0, 2.0)
+        entries += [
+            str(idx),
+            f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
+            text,
+            "",
+        ]
+        idx += 1
+
+    return "\n".join(entries).strip() + "\n"
+
+
+def chunks_to_srt_preserving_segments(chunks: list[dict]) -> str:
+    """輸出已由語意模型決定切點的字幕，不再套用本機重新斷句。"""
+    entries: list[str] = []
     idx = 1
     for chunk in chunks:
         text = strip_punct_for_srt((chunk.get("text") or "").strip())
-        ts   = chunk.get("timestamp") or (0.0, 0.0)
         if not text:
             continue
-        start = ts[0] if ts[0] is not None else 0.0
-        end   = ts[1] if ts[1] is not None else start + 2.0
+        ts = chunk.get("timestamp") or (chunk.get("start", 0.0), chunk.get("end", 0.0))
+        start = float(ts[0] if ts[0] is not None else 0.0)
+        end = float(ts[1] if ts[1] is not None else start + 2.0)
         if end <= start:
-            end = start + 2.0
-
-        # wrap_srt_text 會自動依據 jieba 詞彙來斷句，確保詞彙完整性
-        lines = wrap_srt_text(text)
-        if not lines:
-            continue
-            
-        # 若只有一行，直接輸出為單句字幕
-        if len(lines) == 1:
-            entries += [
-                str(idx),
-                f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
-                lines[0],
-                "",
-            ]
-            idx += 1
-        else:
-            # 若超過字數被切成多行，依照字數比例均分時間碼，強制變成獨立的下一句
-            total_chars = sum(len(l) for l in lines)
-            duration = end - start
-            current_start = start
-            
-            for line in lines:
-                line_chars = len(line)
-                # 依字數比例計算這句切斷的字幕應分配到的時間長度
-                line_duration = duration * (line_chars / total_chars) if total_chars > 0 else duration
-                line_end = current_start + line_duration
-                
-                entries += [
-                    str(idx),
-                    f"{seconds_to_srt_time(current_start)} --> {seconds_to_srt_time(line_end)}",
-                    line,
-                    "",
-                ]
-                idx += 1
-                current_start = line_end
-
+            end = start + 0.04
+        entries.extend([
+            str(idx),
+            f"{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}",
+            text,
+            "",
+        ])
+        idx += 1
     return "\n".join(entries).strip() + "\n"
 
 
@@ -628,6 +828,63 @@ def align_caption_indices(original: list[dict], updated: list[dict]) -> list[tup
         aligned.extend((idx, None) for idx in range(i1 + paired, i2))
         aligned.extend((None, idx) for idx in range(j1 + paired, j2))
     return aligned
+
+
+def project_ai_review_indices(before_chunks: list[dict], after_chunks: list[dict],
+                              output_chunks: list[dict], covered_indices=None
+                              ) -> tuple[set[int], set[int], set[int]]:
+    """把 AI 校對狀態依時間區間投影到重新斷句後的字幕。
+
+    AI 校對發生在本機重新斷句之前，所以不能直接拿舊字幕 index 為編輯器上色；
+    一個原始字幕可能拆成多個輸出字幕，也可能與相鄰字幕合併。
+    回傳 ``(有修改, 已檢查未必修改, 未完整檢查)`` 的輸出字幕 index 集合。
+    """
+    source_count = min(len(before_chunks), len(after_chunks))
+    if covered_indices is None:
+        covered = set(range(source_count))
+    else:
+        covered = {
+            int(idx) for idx in covered_indices
+            if isinstance(idx, (int, float)) and 0 <= int(idx) < source_count
+        }
+
+    changed_sources = {
+        idx for idx in range(source_count)
+        if strip_punct_for_srt((before_chunks[idx].get("text") or "").strip()).casefold()
+        != strip_punct_for_srt((after_chunks[idx].get("text") or "").strip()).casefold()
+    }
+
+    def interval(chunk: dict) -> tuple[float, float]:
+        ts = chunk.get("timestamp") or (chunk.get("start", 0.0), chunk.get("end", 0.0))
+        start = float(ts[0] if ts[0] is not None else 0.0)
+        end = float(ts[1] if ts[1] is not None else start)
+        return (min(start, end), max(start, end))
+
+    source_intervals = [interval(after_chunks[idx]) for idx in range(source_count)]
+    reviewed: set[int] = set()
+    checked: set[int] = set()
+    unchecked: set[int] = set()
+    for output_idx, output_chunk in enumerate(output_chunks):
+        out_start, out_end = interval(output_chunk)
+        overlapping = {
+            source_idx for source_idx, (src_start, src_end) in enumerate(source_intervals)
+            if min(out_end, src_end) - max(out_start, src_start) > 0.0005
+        }
+        if not overlapping:
+            # 極短字幕或毫秒四捨五入可能只碰到邊界；用中點做安全後備。
+            midpoint = (out_start + out_end) / 2.0
+            overlapping = {
+                source_idx for source_idx, (src_start, src_end) in enumerate(source_intervals)
+                if src_start - 0.002 <= midpoint <= src_end + 0.002
+            }
+
+        if overlapping and overlapping.issubset(covered):
+            checked.add(output_idx)
+            if overlapping & changed_sources:
+                reviewed.add(output_idx)
+        else:
+            unchecked.add(output_idx)
+    return reviewed, checked, unchecked
 
 
 def _needs_punct(text: str) -> bool:
@@ -850,9 +1107,16 @@ def _post_json(url: str, headers: dict, payload: dict, timeout: int = 120) -> di
         ) from None
 
 
-# ── 每批最多送出的字數（中文約 500 字 ≈ 安全範圍）────────
+# ── 每批除了文字量，也限制字幕組數與完整 SRT 大小。短句很多時，
+#    只看中文字數會低估時間碼與序號造成的輸出長度，導致模型截斷後半批。
 LLM_BATCH_CHARS = 500
+LLM_BATCH_MAX_GROUPS = 40
+LLM_BATCH_MAX_SERIALIZED_CHARS = 3200
+LLM_RETRY_DELAYS = (5.0, 15.0, 30.0)
+LLM_PARTIAL_RETRY_DEPTH = 3
 LAST_LLM_MERGE_META: dict = {}
+LAST_SEMANTIC_SEGMENTATION_META: dict = {}
+SEMANTIC_SEGMENTATION_WINDOW_CHARS = 450
 
 
 def _llm_call_once(system: str, user_msg: str, cfg: dict) -> str:
@@ -953,6 +1217,73 @@ def chunks_to_srt_string(chunks_list: list[dict], start_idx: int = 1) -> str:
         lines.append(f"{idx}\n{s_ts} --> {e_ts}\n{text}\n")
     return "\n".join(lines)
 
+
+_CONTEXT_CANONICAL_TERM_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]*(?:[._+\-][A-Za-z0-9]+)*)(?![A-Za-z0-9])"
+)
+
+
+def canonical_terms_from_context(context_notes: str) -> dict[str, str]:
+    """擷取補充資料中的英數專名；相同詞最後出現的拼法具有最高優先權。"""
+    notes = re.sub(
+        r"https?://\S+|www\.\S+|\b\S+@\S+\b",
+        " ",
+        context_notes or "",
+        flags=re.I,
+    )
+    terms: dict[str, str] = {}
+    for match in _CONTEXT_CANONICAL_TERM_RE.finditer(notes):
+        value = match.group(1)
+        if len(value) < 2:
+            continue
+        terms[value.casefold()] = value
+    return terms
+
+
+def replacements_from_context(context_notes: str) -> list[tuple[str, str]]:
+    """解析補充資料中每行「原文 > 指定文字」形式的強制替換。"""
+    mappings: dict[str, tuple[str, str]] = {}
+    for raw_line in (context_notes or "").splitlines():
+        line = re.sub(r"^\s*[-•*]\s*", "", raw_line).strip()
+        match = re.match(r"^(.+?)\s*(?:->|=>|→|＞|>|＝|=)\s*(.+?)$", line)
+        if not match:
+            continue
+        source = match.group(1).strip()
+        target = match.group(2).strip()
+        if not source or not target or source == target or len(source) > 120 or len(target) > 120:
+            continue
+        mappings[source.casefold()] = (source, target)
+    return list(mappings.values())
+
+
+def apply_context_replacements(text: str, replacements: list[tuple[str, str]]) -> str:
+    """套用使用者明確指定的替換；英文大小寫不敏感，且不誤傷較長單字。"""
+    result = text or ""
+    for source, target in sorted(replacements, key=lambda item: -len(item[0])):
+        pieces = [re.escape(piece) for piece in re.split(r"\s+", source.strip()) if piece]
+        if not pieces:
+            continue
+        pattern = r"\s+".join(pieces)
+        if source[:1].isascii() and source[:1].isalnum():
+            pattern = r"(?<![A-Za-z0-9])" + pattern
+        if source[-1:].isascii() and source[-1:].isalnum():
+            pattern += r"(?![A-Za-z0-9])"
+        result = re.sub(pattern, lambda _match, replacement=target: replacement, result, flags=re.I)
+    return result
+
+
+def apply_context_canonical_terms(text: str, terms: dict[str, str]) -> str:
+    """依使用者補充資料強制套用英數專名大小寫，不碰較長單字的一部分。"""
+    result = text or ""
+    for folded, canonical in sorted(terms.items(), key=lambda item: -len(item[0])):
+        result = re.sub(
+            rf"(?<![A-Za-z0-9]){re.escape(folded)}(?![A-Za-z0-9])",
+            lambda _match, replacement=canonical: replacement,
+            result,
+            flags=re.I,
+        )
+    return result
+
 def llm_merge(chunks: list[dict], cfg: dict, log_fn,
               context_notes: str = "", use_text_fix: bool = True,
               progress_cb=None) -> tuple[list[str], str]:
@@ -978,38 +1309,69 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
         system = SRT_FORMAT_ONLY_PROMPT
         log_fn("AI：修改指令關閉，不套用總編輯 Prompt。")
 
-    # 補充資料
-    context_suffix = ""
+    # 補充資料：不論是否啟用總編輯，都必須送入 AI；指定拼法另外做確定性校驗。
+    context_prefix = ""
+    context_terms = canonical_terms_from_context(context_notes)
+    context_replacements = replacements_from_context(context_notes)
     if context_notes.strip():
-        context_suffix = (
-            f"\n\n【補充資料：大綱 / 人名 / 專有名詞等】\n{context_notes.strip()}\n"
-            "（請優先以上方補充資料中的正確寫法為準，修正辨識結果中的錯誤。）"
+        canonical_lines = ""
+        if context_terms:
+            canonical_lines = (
+                "\n【必須逐字採用的英數拼法】\n"
+                + "、".join(context_terms.values())
+                + "\n"
+            )
+        context_prefix = (
+            f"【使用者補充資料（最高優先）】\n{context_notes.strip()}\n"
+            f"{canonical_lines}"
+            "補充資料中的人名、專有名詞及英文字母大小寫是指定輸出，"
+            "不得改成模型慣用、官方常見或其他大小寫。每行若使用『原文 > 指定文字』、"
+            "『原文 → 指定文字』或『原文 = 指定文字』，必須將左側完整替換成右側。\n\n"
+        )
+        system += (
+            "\n\n【使用者補充資料優先規則】若使用者提供補充資料，其中指定的人名、"
+            "專有名詞與英數大小寫高於一般官方寫法。即使未啟用總編輯，也必須依補充資料"
+            "修正對應文字；除此之外仍保留字幕原文與時間碼。"
         )
 
-    # ── 分批處理：根據字數將 chunks 分組 ─────────────────────
-    batches: list[list[dict]] = []
-    current_batch: list[dict] = []
+    # ── 分批處理：同時限制文字、字幕組數與序列化後的 SRT 大小 ──
+    batches: list[list[int]] = []
+    current_batch: list[int] = []
     current_chars = 0
-    
-    for c in chunks:
+    current_serialized_chars = 0
+
+    for idx, c in enumerate(chunks):
         text = (c.get("text") or "").strip()
         if not text:
             continue
-        if current_batch and current_chars + len(text) > LLM_BATCH_CHARS:
+        serialized_chars = len(chunks_to_srt_string([c], start_idx=idx + 1))
+        batch_is_full = current_batch and (
+            current_chars + len(text) > LLM_BATCH_CHARS
+            or len(current_batch) >= LLM_BATCH_MAX_GROUPS
+            or current_serialized_chars + serialized_chars > LLM_BATCH_MAX_SERIALIZED_CHARS
+        )
+        if batch_is_full:
             batches.append(current_batch)
             current_batch = []
             current_chars = 0
-        current_batch.append(c)
+            current_serialized_chars = 0
+        current_batch.append(idx)
         current_chars += len(text)
+        current_serialized_chars += serialized_chars
     if current_batch:
         batches.append(current_batch)
 
     total_batches = len(batches)
     log_fn(f"AI：共分成 {total_batches} 批送出標準 SRT 校對")
-    expected_timecode_groups = sum(len(batch) for batch in batches)
-    matched_timecode_groups = 0
-    covered_indices: set[int] = set()
-    failed_batches: list[int] = []
+    expected_timecode_groups = len(chunks)
+    # 空白字幕不需要送給 AI，但仍算已處理，避免介面誤標成灰色。
+    covered_indices: set[int] = {
+        idx for idx, chunk in enumerate(chunks) if not (chunk.get("text") or "").strip()
+    }
+    failed_batches: set[int] = set()
+    request_count = 0
+    retry_count = 0
+    partial_retry_count = 0
 
     # 用來存放最終校對後文字的清單（與原始 chunks 一一對應）
     # 初始化先填入 Breeze ASR 的原始文字，確保萬一 API 失敗時有安全底牌
@@ -1024,77 +1386,145 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
         e_ts = format_timestamp(ts[1] if ts[1] is not None else 0.0)
         ts_map[(s_ts, e_ts)] = idx
 
-    # ── 逐批呼叫 ─────────────────────────────────────────
-    start_srt_idx = 1
-    for i, batch in enumerate(batches):
-        if progress_cb:
-            progress_cb(i, total_batches)
-        log_fn(f"AI校對第 {i+1}/{total_batches} 批（{len(batch)} 組字幕）...")
+    configured_delays = cfg.get("_llm_retry_delays", LLM_RETRY_DELAYS)
+    try:
+        retry_delays = tuple(max(0.0, float(value)) for value in configured_delays)
+    except (TypeError, ValueError):
+        retry_delays = LLM_RETRY_DELAYS
+    try:
+        partial_retry_depth = max(0, int(cfg.get("_llm_partial_retry_depth", LLM_PARTIAL_RETRY_DEPTH)))
+    except (TypeError, ValueError):
+        partial_retry_depth = LLM_PARTIAL_RETRY_DEPTH
 
-        # 直接將這一批 chunks 轉成標準的 SRT 格式文本
-        srt_input_text = chunks_to_srt_string(batch, start_idx=start_srt_idx)
-        start_srt_idx += len(batch)
-
+    def build_user_message(indices: list[int]) -> str:
+        # 保留原始序號；漏回重試時 indices 可能不連續，時間碼仍是絕對鑰匙。
+        srt_input_text = "\n".join(
+            chunks_to_srt_string([chunks[idx]], start_idx=idx + 1).strip()
+            for idx in indices
+        )
         if use_text_fix:
-            user_msg = f"【請校對以下標準 SRT 字幕，嚴禁變動時間碼結構】\n\n{srt_input_text}{context_suffix}"
-        else:
-            user_msg = f"【請以相同標準 SRT 格式回傳以下字幕，嚴禁變動時間碼結構】\n\n{srt_input_text}"
+            return f"{context_prefix}【請校對以下標準 SRT 字幕，嚴禁變動時間碼結構】\n\n{srt_input_text}"
+        return f"{context_prefix}【請以相同標準 SRT 格式回傳以下字幕，嚴禁變動時間碼結構】\n\n{srt_input_text}"
 
-        try:
-            raw_response = _llm_call_once(system, user_msg, cfg)
-            
-            # 解析 AI 回傳的 SRT 格式
-            # 邏輯：抓取時間碼行，並將其下方的文字塞回對應的 chunk index
-            srt_lines = raw_response.strip().splitlines()
-            current_ts_key = None
-            current_text_lines = []
-            seen_batch_keys = set()
+    def parse_response(raw_response: str, allowed_indices: set[int]) -> set[int]:
+        """只接受本次請求範圍內、時間碼完全相符的字幕組。"""
+        seen_indices: set[int] = set()
+        current_ts_key = None
+        current_text_lines: list[str] = []
 
-            def flush_current_group():
-                nonlocal matched_timecode_groups
-                if current_ts_key and current_ts_key in ts_map:
-                    target_idx = ts_map[current_ts_key]
+        def flush_current_group():
+            if current_ts_key and current_ts_key in ts_map:
+                target_idx = ts_map[current_ts_key]
+                if target_idx in allowed_indices:
                     final_text_results[target_idx] = " ".join(current_text_lines).strip()
                     covered_indices.add(target_idx)
-                    if current_ts_key not in seen_batch_keys:
-                        seen_batch_keys.add(current_ts_key)
-                        matched_timecode_groups += 1
+                    seen_indices.add(target_idx)
 
-            for line in srt_lines:
-                line_str = line.strip()
-                if not line_str:
-                    continue
-                
-                # 判斷是否為時間碼行 (例如 00:00:17,800 --> 00:00:21,069)
-                if "-->" in line_str:
-                    # 在進入下一個時間碼前，先把上一個時間碼累積的文字存進去
-                    flush_current_group()
-                    
-                    # 解析新的時間碼
-                    parts = line_str.split("-->")
-                    if len(parts) == 2:
-                        current_ts_key = (parts[0].strip(), parts[1].strip())
-                    current_text_lines = []
-                elif line_str.isdigit():
-                    # 這是 SRT 的序號行，忽略不處理
-                    continue
-                else:
-                    # 這是字幕文字行，累積起來
-                    if current_ts_key:
-                        current_text_lines.append(line_str)
-            
-            # 處理最後一組殘留的字幕
-            flush_current_group()
+        for line in (raw_response or "").strip().splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            if "-->" in line_str:
+                flush_current_group()
+                parts = line_str.split("-->")
+                current_ts_key = (
+                    (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else None
+                )
+                current_text_lines = []
+            elif line_str.isdigit():
+                continue
+            elif current_ts_key:
+                current_text_lines.append(line_str)
+        flush_current_group()
+        return seen_indices
 
-        except Exception as e:
-            failed_batches.append(i + 1)
-            log_fn(f"警告：第 {i+1} 批 AI 請求失敗（{e}），此批將沿用原始辨識結果。")
+    permanent_error_markers = (
+        "api key", "無效或已過期", "額度", "配額", "quota", "billing",
+        "credit", "找不到指定的模型", "model not found", "permission denied",
+        "http 400", "請求被 api 拒絕", "prompt 過長",
+    )
 
+    def call_with_network_retries(indices: list[int], label: str) -> str:
+        nonlocal request_count, retry_count
+        user_msg = build_user_message(indices)
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                request_count += 1
+                return _llm_call_once(system, user_msg, cfg)
+            except Exception as exc:
+                error_text = str(exc).lower()
+                permanent = any(marker in error_text for marker in permanent_error_markers)
+                if permanent or attempt >= len(retry_delays):
+                    raise
+                delay = retry_delays[attempt]
+                retry_count += 1
+                log_fn(
+                    f"AI：{label} 請求失敗，{delay:g} 秒後自動重試 "
+                    f"({attempt + 2}/{len(retry_delays) + 1})：{exc}"
+                )
+                if delay:
+                    time.sleep(delay)
+        raise RuntimeError("AI 請求重試流程異常。")
+
+    def process_indices(indices: list[int], root_batch: int, depth: int = 0):
+        nonlocal partial_retry_count
+        if not indices:
+            return
+        label = f"第 {root_batch}/{total_batches} 批"
+        if depth:
+            label += f"漏回補校第 {depth} 層"
+        try:
+            raw_response = call_with_network_retries(indices, label)
+        except Exception as exc:
+            failed_batches.add(root_batch)
+            log_fn(f"警告：{label} AI 請求重試後仍失敗（{exc}）。")
+            return
+
+        parse_response(raw_response, set(indices))
+        missing = [idx for idx in indices if idx not in covered_indices]
+        if not missing:
+            return
+        if depth >= partial_retry_depth:
+            failed_batches.add(root_batch)
+            log_fn(f"警告：{label} 仍漏回 {len(missing)} 組，已達補校上限。")
+            return
+
+        log_fn(
+            f"AI：{label} 只回傳 {len(indices) - len(missing)}/{len(indices)} 組；"
+            f"自動把漏回的 {len(missing)} 組縮小重送。"
+        )
+        midpoint = max(1, len(missing) // 2)
+        retry_groups = [missing] if len(missing) == 1 else [missing[:midpoint], missing[midpoint:]]
+        for retry_group in retry_groups:
+            partial_retry_count += 1
+            process_indices(retry_group, root_batch, depth + 1)
+
+    # ── 逐批呼叫；漏回會縮小批次補送，連線錯誤會退避重試 ──────
+    for i, batch_indices in enumerate(batches):
+        if progress_cb:
+            progress_cb(i, total_batches)
+        log_fn(f"AI校對第 {i + 1}/{total_batches} 批（{len(batch_indices)} 組字幕）...")
+        process_indices(batch_indices, i + 1)
+
+    matched_timecode_groups = len(covered_indices)
+    uncovered_indices = sorted(set(range(len(chunks))) - covered_indices)
     if matched_timecode_groups != expected_timecode_groups:
         log_fn(
             f"提示：AI 回傳可對齊的時間碼組數為 {matched_timecode_groups}/{expected_timecode_groups}，"
-            "已用安全回填保護缺漏組，時間碼框架不受影響。"
+            "自動補校後仍缺漏；已保留原始文字與時間碼，不能視為完整校對。"
         )
+
+    # 模型偶爾仍會忽略補充資料；回填前再做一次確定性校驗。
+    if context_replacements:
+        final_text_results = [
+            apply_context_replacements(text, context_replacements)
+            for text in final_text_results
+        ]
+    if context_terms:
+        final_text_results = [
+            apply_context_canonical_terms(text, context_terms)
+            for text in final_text_results
+        ]
 
     # ── 將校對後的文字同步回原始 chunks 結構中 ──────────────────
     for idx, cleaned_text in enumerate(final_text_results):
@@ -1104,8 +1534,13 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
         "covered_indices": sorted(covered_indices),
         "covered_count": len(covered_indices),
         "total_count": len(chunks),
-        "failed_batches": failed_batches,
+        "uncovered_indices": uncovered_indices,
+        "complete": not uncovered_indices,
+        "failed_batches": sorted(failed_batches),
         "total_batches": total_batches,
+        "request_count": request_count,
+        "retry_count": retry_count,
+        "partial_retry_count": partial_retry_count,
     }
 
     # 建立純文字輸出
@@ -1113,6 +1548,261 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
     plain = "\n".join(all_out_lines)
     
     return final_text_results, plain
+
+
+def _semantic_window_text_map(window_chunks: list[dict]) -> tuple[str, list[float]]:
+    """建立完整文字流，以及每個字元邊界對應的原始時間。"""
+    chars: list[str] = []
+    boundary_times: list[float] = []
+    for chunk in window_chunks:
+        clean = strip_punct_for_srt((chunk.get("text") or "").strip())
+        if not clean:
+            continue
+        ts = chunk.get("timestamp") or (chunk.get("start", 0.0), chunk.get("end", 0.0))
+        start = float(ts[0] if ts[0] is not None else 0.0)
+        end = float(ts[1] if ts[1] is not None else start + 0.04)
+        if end <= start:
+            end = start + 0.04
+
+        if not boundary_times:
+            boundary_times.append(start)
+        else:
+            previous_end = boundary_times[-1]
+            sep = ""
+            if chars and chars[-1].isascii() and clean[:1].isascii() \
+                    and chars[-1].isalnum() and clean[:1].isalnum():
+                sep = " "
+            if sep:
+                chars.append(sep)
+                boundary_times.append(max(previous_end, start))
+            else:
+                boundary_times[-1] = max(previous_end, (previous_end + start) / 2.0)
+
+        widths = [max(0.01, srt_char_width(ch)) for ch in clean]
+        total_width = sum(widths) or 1.0
+        cumulative = 0.0
+        for ch, width in zip(clean, widths):
+            cumulative += width
+            chars.append(ch)
+            boundary_times.append(start + (end - start) * cumulative / total_width)
+
+    return "".join(chars), boundary_times
+
+
+def _parse_semantic_segments(raw_response: str, source_text: str) -> tuple[list[str], list[int]]:
+    """解析模型切點；文字不是逐字相同就拒絕，輸出內容永遠取自 source。"""
+    raw = (raw_response or "").strip()
+    match = re.search(r"\{.*\}", raw, flags=re.S)
+    if not match:
+        raise ValueError("回應中找不到 JSON。")
+    payload = json.loads(match.group(0))
+    proposed = payload.get("segments") if isinstance(payload, dict) else None
+    if not isinstance(proposed, list) or not proposed or not all(isinstance(item, str) for item in proposed):
+        raise ValueError("JSON 缺少有效的 segments 陣列。")
+
+    canonical_source = re.sub(r"\s+", "", source_text)
+    canonical_parts = [re.sub(r"\s+", "", item) for item in proposed]
+    if any(not item for item in canonical_parts):
+        raise ValueError("模型產生空白字幕段。")
+    if "".join(canonical_parts) != canonical_source:
+        raise ValueError("模型回傳文字有增刪、改字或字序變動。")
+
+    # 只採用模型提供的每段字數；真正文字重新從 source 切出，確保零改字。
+    source_pos = 0
+    rebuilt: list[str] = []
+    boundary_positions: list[int] = [0]
+    for part_index, canonical_part in enumerate(canonical_parts):
+        needed = len(canonical_part)
+        counted = 0
+        start_pos = source_pos
+        while source_pos < len(source_text) and counted < needed:
+            if not source_text[source_pos].isspace():
+                counted += 1
+            source_pos += 1
+        if counted != needed:
+            raise ValueError("模型切點無法映射回原始文字。")
+        if part_index < len(canonical_parts) - 1:
+            while source_pos < len(source_text) and source_text[source_pos].isspace():
+                source_pos += 1
+        piece = source_text[start_pos:source_pos].strip()
+        if not piece:
+            raise ValueError("映射後出現空白字幕段。")
+        rebuilt.append(piece)
+        boundary_positions.append(source_pos)
+    if source_pos != len(source_text):
+        raise ValueError("模型切點未覆蓋完整原始文字。")
+    return rebuilt, boundary_positions
+
+
+def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
+                              target_width: float = SRT_TARGET_LINE_WIDTH,
+                              progress_cb=None) -> tuple[list[dict], dict]:
+    """以語意模型重新選擇整段口播切點，再逐字映射回原時間軸。
+
+    模型只提供切點。任何增刪改字、漏字、格式錯誤或請求失敗都會讓該次
+    ``complete`` 為 False，呼叫端應整份回退到本機斷句，避免混用兩種風格。
+    """
+    global LAST_SEMANTIC_SEGMENTATION_META
+    prepared: list[dict] = []
+    for chunk in chunks:
+        text = strip_punct_for_srt((chunk.get("text") or "").strip())
+        if not text:
+            continue
+        item = dict(chunk)
+        item["text"] = text
+        prepared.append(item)
+    if not prepared:
+        meta = {
+            "complete": True, "input_count": len(chunks), "output_count": 0,
+            "total_windows": 0, "failed_windows": [], "request_count": 0,
+            "retry_count": 0, "integrity_retry_count": 0, "integrity_failures": 0,
+        }
+        LAST_SEMANTIC_SEGMENTATION_META = meta
+        return [], meta
+
+    windows: list[list[dict]] = []
+    current: list[dict] = []
+    current_chars = 0
+    previous_end = None
+    for item in prepared:
+        ts = item.get("timestamp") or (item.get("start", 0.0), item.get("end", 0.0))
+        start = float(ts[0] if ts[0] is not None else 0.0)
+        end = float(ts[1] if ts[1] is not None else start)
+        text_len = len(re.sub(r"\s+", "", item["text"]))
+        strong_pause = current and previous_end is not None and start - previous_end >= 0.55
+        size_full = current and current_chars + text_len > SEMANTIC_SEGMENTATION_WINDOW_CHARS
+        if strong_pause or size_full:
+            windows.append(current)
+            current = []
+            current_chars = 0
+        current.append(item)
+        current_chars += text_len
+        previous_end = end
+    if current:
+        windows.append(current)
+
+    configured_delays = cfg.get("_llm_retry_delays", LLM_RETRY_DELAYS)
+    try:
+        retry_delays = tuple(max(0.0, float(value)) for value in configured_delays)
+    except (TypeError, ValueError):
+        retry_delays = LLM_RETRY_DELAYS
+    permanent_markers = (
+        "api key", "無效或已過期", "額度", "配額", "quota", "billing",
+        "credit", "找不到指定的模型", "model not found", "http 400",
+    )
+    semantic_cfg = dict(cfg)
+    semantic_cfg["_semantic_segmentation_pass"] = True
+    result: list[dict] = []
+    failed_windows: list[int] = []
+    integrity_failures = 0
+    request_count = 0
+    retry_count = 0
+    integrity_retry_count = 0
+
+    try:
+        integrity_retry_limit = max(0, int(cfg.get("_semantic_integrity_retries", 3)))
+    except (TypeError, ValueError):
+        integrity_retry_limit = 3
+
+    def request_semantic(message: str, window_number: int):
+        nonlocal request_count, retry_count
+        raw = None
+        error = None
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                request_count += 1
+                raw = _llm_call_once(SEMANTIC_SEGMENTATION_PROMPT, message, semantic_cfg)
+                error = None
+                break
+            except Exception as exc:
+                error = exc
+                permanent = any(marker in str(exc).lower() for marker in permanent_markers)
+                if permanent or attempt >= len(retry_delays):
+                    break
+                delay = retry_delays[attempt]
+                retry_count += 1
+                log_fn(
+                    f"語意斷句第 {window_number}/{len(windows)} 段請求失敗，"
+                    f"{delay:g} 秒後重試：{exc}"
+                )
+                if delay:
+                    time.sleep(delay)
+        return raw, error
+
+    for window_index, window in enumerate(windows):
+        if progress_cb:
+            progress_cb(window_index, len(windows))
+        source_text, time_map = _semantic_window_text_map(window)
+        user_msg = (
+            "【本段唯一可輸出的文字】\n" + source_text
+        )
+        segments = positions = None
+        parse_error = None
+        request_error = None
+        retry_message = user_msg
+        for integrity_attempt in range(integrity_retry_limit + 1):
+            raw_response, request_error = request_semantic(retry_message, window_index + 1)
+            if request_error is not None or raw_response is None:
+                break
+            try:
+                segments, positions = _parse_semantic_segments(raw_response, source_text)
+                parse_error = None
+                break
+            except Exception as exc:
+                parse_error = exc
+                integrity_failures += 1
+                if integrity_attempt >= integrity_retry_limit:
+                    break
+                integrity_retry_count += 1
+                log_fn(
+                    f"語意斷句第 {window_index + 1}/{len(windows)} 段偷改文字，"
+                    f"已拒絕結果並嚴格重試 ({integrity_attempt + 1}/{integrity_retry_limit})。"
+                )
+                retry_message = (
+                    user_msg
+                    + "\n\n【上一回合違規】你增加、刪除、替換或移動了原文。"
+                    "這次只能在『本段唯一可輸出的文字』中插入分段邊界；"
+                    "segments 逐項串接後，除分段外必須與原文逐字相同。"
+                )
+
+        if request_error is not None or segments is None or positions is None:
+            failed_windows.append(window_index + 1)
+            if request_error is not None:
+                log_fn(f"警告：語意斷句第 {window_index + 1} 段失敗：{request_error}")
+            else:
+                log_fn(f"警告：語意斷句第 {window_index + 1} 段未通過逐字驗證：{parse_error}")
+            continue
+
+        if len(time_map) != len(source_text) + 1:
+            failed_windows.append(window_index + 1)
+            integrity_failures += 1
+            log_fn(f"警告：語意斷句第 {window_index + 1} 段內部字元時間映射長度不一致。")
+            continue
+        for segment_index, text_value in enumerate(segments):
+            start_pos = positions[segment_index]
+            end_pos = positions[segment_index + 1]
+            start_time = float(time_map[start_pos])
+            end_time = float(time_map[end_pos])
+            if end_time <= start_time:
+                end_time = start_time + 0.04
+            result.append({"text": text_value, "timestamp": (start_time, end_time)})
+
+    complete = not failed_windows and bool(result)
+    meta = {
+        "complete": complete,
+        "input_count": len(prepared),
+        "output_count": len(result) if complete else 0,
+        "total_windows": len(windows),
+        "failed_windows": failed_windows,
+        "request_count": request_count,
+        "retry_count": retry_count,
+        "integrity_retry_count": integrity_retry_count,
+        "integrity_failures": integrity_failures,
+        "target_width": float(target_width),
+        "text_preserved": complete,
+    }
+    LAST_SEMANTIC_SEGMENTATION_META = meta
+    return (result if complete else []), meta
 
 # ═══════════════════════════════════════════════════════════
 #  主視窗

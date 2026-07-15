@@ -52,9 +52,10 @@ _FALLBACK_FREE = {
 }
 _FALLBACK_SUPPORTER = {
     "batch_processing", "quick_compare_full", "custom_rules",
-    "diarization", "domain_prompt_templates", "custom_dictionary",
+    "learning_loop", "diarization", "domain_prompt_templates",
+    "custom_dictionary", "project_profiles",
     "supporter_badge", "early_access",
-}
+}  # 與 features.py 同步；載入失敗時備援
 
 
 def _load_feature_sets():

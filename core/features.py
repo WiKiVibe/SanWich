@@ -21,11 +21,13 @@ SUPPORTER_FEATURES = {
     "batch_processing",         # 批次處理
     "quick_compare_full",       # AI 修改快速對照完整版
     "custom_rules",             # 個人化規則庫
-    "diarization",              # 語者分離（TXT 標註語者）
-    "domain_prompt_templates",  # 領域 Prompt 模板（第二階段）
-    "custom_dictionary",        # 自訂詞庫（第二階段）
+    "learning_loop",            # 學習閉環（回饋事件／候選規則）
+    "diarization",              # 語者分離（TXT／可選 SRT 標註語者）
+    "domain_prompt_templates",  # 領域 Prompt 模板
+    "custom_dictionary",        # 自訂詞庫
+    "project_profiles",         # 專案／系列設定
     "supporter_badge",          # Supporter 標章
-    "early_access",             # 早期功能測試入口
+    "early_access",             # 早期功能／效能實驗入口
 }
 
 # UI 顯示名稱（供提示彈窗使用）
@@ -33,9 +35,11 @@ FEATURE_LABELS = {
     "batch_processing": "批次處理",
     "quick_compare_full": "快速對照完整版",
     "custom_rules": "個人化規則庫",
+    "learning_loop": "學習閉環",
     "diarization": "語者分離",
     "domain_prompt_templates": "領域 Prompt 模板",
     "custom_dictionary": "自訂詞庫",
+    "project_profiles": "專案／系列設定",
     "supporter_badge": "Supporter 標章",
     "early_access": "早期功能測試入口",
 }

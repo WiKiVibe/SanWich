@@ -39,6 +39,9 @@ _語者分離_暫緩備份/
 _語者分離_暫緩備份/models/
 
 # Local media, samples, and temporary exports
+# Copyrighted local test footage and reference subtitles
+/test_footage/
+
 audio_SAMPLE.*
 *.wav
 *.mp3

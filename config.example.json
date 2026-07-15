@@ -5,7 +5,15 @@
   "use_llm": false,
   "use_text_fix": true,
   "txt_diarization_enabled": false,
+  "srt_diarization_enabled": false,
   "diarization_num_speakers": 3,
+  "srt_max_chars_per_line": "",
   "output_srt_enabled": true,
-  "output_txt_enabled": false
+  "output_txt_enabled": false,
+  "use_personal_rules": true,
+  "personal_rules_domain": "通用",
+  "use_domain_prompt": true,
+  "prompt_template_domain": "通用",
+  "use_custom_dictionary": true,
+  "use_project_context": true
 }

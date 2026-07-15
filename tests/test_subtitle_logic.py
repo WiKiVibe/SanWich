@@ -14,6 +14,42 @@ SPEC.loader.exec_module(CORE)
 
 
 class SubtitleLogicTests(unittest.TestCase):
+    def test_context_terms_force_user_casing_without_touching_longer_words(self):
+        terms = CORE.canonical_terms_from_context("DemoMark 請統一寫成 DEMOMARK；另外使用 Siri AI")
+        self.assertEqual(terms["demomark"], "DEMOMARK")
+        self.assertEqual(
+            CORE.apply_context_canonical_terms("DemoMark與demomark，但DemoMarker不變", terms),
+            "DEMOMARK與DEMOMARK，但DemoMarker不變",
+        )
+
+    def test_context_is_sent_and_casing_is_enforced_without_editor_prompt(self):
+        chunks = [{"timestamp": (0.0, 1.0), "text": "DemoMark推出Demo Glass新功能"}]
+        captured = []
+        original_call = CORE._llm_call_once
+        try:
+            def fake_call(system, user_msg, _cfg):
+                captured.append((system, user_msg))
+                return "1\n00:00:00,000 --> 00:00:01,000\nDemoMark推出Demo Glass新功能\n"
+
+            CORE._llm_call_once = fake_call
+            result, _plain = CORE.llm_merge(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [],
+                },
+                lambda *_args: None,
+                context_notes="DemoMark > DEMOMARK\nDemo Glass > 示範眼鏡",
+                use_text_fix=False,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+
+        self.assertEqual(result, ["DEMOMARK推出示範眼鏡新功能"])
+        self.assertIn("使用者補充資料（最高優先）", captured[0][1])
+        self.assertLess(captured[0][1].find("DEMOMARK"), captured[0][1].find("00:00:00,000"))
+        self.assertIn("補充資料優先規則", captured[0][0])
+
     def test_semantic_boundaries_follow_chinese_phrase_structure(self):
         cases = {
             "傳說中見神殺神見佛殺佛的萬哥出現了": ["傳說中見神殺神", "見佛殺佛的萬哥出現了"],
@@ -74,7 +110,66 @@ class SubtitleLogicTests(unittest.TestCase):
             [(0, 0), (None, 1), (1, 2), (2, 3)],
         )
 
-    def test_ai_coverage_reports_partial_response(self):
+    def test_ai_review_colors_follow_time_after_resegmentation(self):
+        before = [
+            {"timestamp": (0.0, 2.0), "text": "第一句"},
+            {"timestamp": (2.0, 4.0), "text": "第二句"},
+        ]
+        after = [
+            {"timestamp": (0.0, 2.0), "text": "第一句"},
+            {"timestamp": (2.0, 4.0), "text": "第二句已校對"},
+        ]
+        output = [
+            {"timestamp": (0.0, 1.0), "text": "第一"},
+            {"timestamp": (1.0, 2.0), "text": "句"},
+            {"timestamp": (2.0, 3.0), "text": "第二句"},
+            {"timestamp": (3.0, 4.0), "text": "已校對"},
+        ]
+
+        reviewed, checked, unchecked = CORE.project_ai_review_indices(
+            before, after, output, covered_indices=[0, 1]
+        )
+        self.assertEqual(checked, {0, 1, 2, 3})
+        self.assertEqual(reviewed, {2, 3})
+        self.assertEqual(unchecked, set())
+
+        reviewed, checked, unchecked = CORE.project_ai_review_indices(
+            before, after, output, covered_indices=[0]
+        )
+        self.assertEqual(checked, {0, 1})
+        self.assertEqual(reviewed, set())
+        self.assertEqual(unchecked, {2, 3})
+
+    def test_ai_coverage_retries_only_missing_groups(self):
+        chunks = [
+            {"timestamp": (0.0, 1.0), "text": "第一句"},
+            {"timestamp": (1.0, 2.0), "text": "第二句"},
+        ]
+        original_call = CORE._llm_call_once
+        responses = iter([
+            "1\n00:00:00,000 --> 00:00:01,000\n第一句已校對\n",
+            "2\n00:00:01,000 --> 00:00:02,000\n第二句已校對\n",
+        ])
+        try:
+            CORE._llm_call_once = lambda *_args, **_kwargs: next(responses)
+            CORE.llm_merge(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [], "_semantic_integrity_retries": 0,
+                },
+                lambda *_args: None,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+        self.assertEqual(CORE.LAST_LLM_MERGE_META["covered_count"], 2)
+        self.assertEqual(CORE.LAST_LLM_MERGE_META["total_count"], 2)
+        self.assertEqual(CORE.LAST_LLM_MERGE_META["covered_indices"], [0, 1])
+        self.assertTrue(CORE.LAST_LLM_MERGE_META["complete"])
+        self.assertGreaterEqual(CORE.LAST_LLM_MERGE_META["partial_retry_count"], 1)
+        self.assertEqual(chunks[1]["text"], "第二句已校對")
+
+    def test_ai_coverage_reports_partial_after_retry_limit(self):
         chunks = [
             {"timestamp": (0.0, 1.0), "text": "第一句"},
             {"timestamp": (1.0, 2.0), "text": "第二句"},
@@ -86,15 +181,175 @@ class SubtitleLogicTests(unittest.TestCase):
             )
             CORE.llm_merge(
                 chunks,
-                {"api_provider": "openai", "api_key": "test", "model": "test"},
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [], "_llm_partial_retry_depth": 1,
+                },
                 lambda *_args: None,
             )
         finally:
             CORE._llm_call_once = original_call
         self.assertEqual(CORE.LAST_LLM_MERGE_META["covered_count"], 1)
-        self.assertEqual(CORE.LAST_LLM_MERGE_META["total_count"], 2)
-        self.assertEqual(CORE.LAST_LLM_MERGE_META["covered_indices"], [0])
+        self.assertFalse(CORE.LAST_LLM_MERGE_META["complete"])
+        self.assertEqual(CORE.LAST_LLM_MERGE_META["uncovered_indices"], [1])
         self.assertEqual(chunks[1]["text"], "第二句")
+
+    def test_ai_request_retries_transient_failure(self):
+        chunks = [{"timestamp": (0.0, 1.0), "text": "第一句"}]
+        original_call = CORE._llm_call_once
+        call_count = {"value": 0}
+
+        def fake_call(*_args, **_kwargs):
+            call_count["value"] += 1
+            if call_count["value"] == 1:
+                raise RuntimeError("請求太頻繁，請稍後再試")
+            return "1\n00:00:00,000 --> 00:00:01,000\n第一句已校對\n"
+
+        try:
+            CORE._llm_call_once = fake_call
+            CORE.llm_merge(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [0],
+                },
+                lambda *_args: None,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+        self.assertEqual(call_count["value"], 2)
+        self.assertEqual(CORE.LAST_LLM_MERGE_META["retry_count"], 1)
+        self.assertTrue(CORE.LAST_LLM_MERGE_META["complete"])
+
+    def test_ai_batching_caps_short_caption_group_count(self):
+        chunks = [
+            {"timestamp": (float(i), float(i + 1)), "text": f"短句{i}"}
+            for i in range(90)
+        ]
+        original_call = CORE._llm_call_once
+        groups_per_request = []
+
+        def echo_srt(_system, user_msg, _cfg):
+            srt_body = user_msg.split("\n\n", 1)[1]
+            groups_per_request.append(srt_body.count("-->"))
+            return srt_body
+
+        try:
+            CORE._llm_call_once = echo_srt
+            CORE.llm_merge(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [],
+                },
+                lambda *_args: None,
+                use_text_fix=False,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+
+        self.assertEqual(CORE.LAST_LLM_MERGE_META["covered_count"], 90)
+        self.assertTrue(CORE.LAST_LLM_MERGE_META["complete"])
+        self.assertEqual(CORE.LAST_LLM_MERGE_META["total_batches"], 3)
+        self.assertLessEqual(max(groups_per_request), CORE.LLM_BATCH_MAX_GROUPS)
+
+    def test_semantic_resegmentation_can_move_boundaries_without_changing_text(self):
+        chunks = [
+            {"timestamp": (1.12, 2.475), "text": "我請Siri AI幫我"},
+            {"timestamp": (2.475, 3.92), "text": "做了一張生日賀卡"},
+            {"timestamp": (3.92, 7.817), "text": "它居然就直接給我這個這個是逼著我送iPhone"},
+            {"timestamp": (7.817, 9.56), "text": "當生日禮物還是怎樣"},
+            {"timestamp": (9.56, 10.434), "text": "它還跟我說它"},
+            {"timestamp": (10.434, 11.6), "text": "保留了原本的設計"},
+        ]
+        expected = [
+            "我請Siri AI",
+            "幫我做了一張生日賀卡",
+            "它居然就直接給我這個",
+            "這個是逼著我送iPhone",
+            "當生日禮物還是怎樣",
+            "它還跟我說",
+            "它保留了原本的設計",
+        ]
+        response = __import__("json").dumps({"segments": expected}, ensure_ascii=False)
+        original_call = CORE._llm_call_once
+        captured_messages = []
+        try:
+            CORE._llm_call_once = lambda _system, user_msg, _cfg: (
+                captured_messages.append(user_msg) or response
+            )
+            result, meta = CORE.semantic_resegment_chunks(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [],
+                },
+                lambda *_args: None,
+                target_width=13,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+
+        self.assertTrue(meta["complete"])
+        self.assertTrue(meta["text_preserved"])
+        self.assertEqual(len(captured_messages), 1)
+        self.assertNotIn("前文，只供理解", captured_messages[0])
+        self.assertNotIn("後文，只供理解", captured_messages[0])
+        self.assertEqual([row["text"] for row in result], expected)
+        original_text = "".join(CORE.strip_punct_for_srt(row["text"]).replace(" ", "") for row in chunks)
+        result_text = "".join(row["text"].replace(" ", "") for row in result)
+        self.assertEqual(result_text, original_text)
+        self.assertAlmostEqual(result[0]["timestamp"][0], 1.12, places=3)
+        self.assertAlmostEqual(result[-1]["timestamp"][1], 11.6, places=3)
+        self.assertTrue(all(a["timestamp"][1] <= b["timestamp"][0] + 0.001
+                            for a, b in zip(result, result[1:])))
+
+    def test_semantic_resegmentation_rejects_any_text_change(self):
+        chunks = [{"timestamp": (0.0, 2.0), "text": "我做了一張生日賀卡"}]
+        original_call = CORE._llm_call_once
+        try:
+            CORE._llm_call_once = lambda *_args, **_kwargs: (
+                '{"segments":["我做了一張生日卡片"]}'
+            )
+            result, meta = CORE.semantic_resegment_chunks(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [], "_semantic_integrity_retries": 0,
+                },
+                lambda *_args: None,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+
+        self.assertEqual(result, [])
+        self.assertFalse(meta["complete"])
+        self.assertEqual(meta["integrity_failures"], 1)
+
+    def test_semantic_resegmentation_retries_integrity_violation(self):
+        chunks = [{"timestamp": (0.0, 2.0), "text": "每個題結束之後我會給一個排名"}]
+        responses = iter([
+            '{"segments":["每題結束之後","我會給一個排名"]}',
+            '{"segments":["每個題結束之後","我會給一個排名"]}',
+        ])
+        original_call = CORE._llm_call_once
+        try:
+            CORE._llm_call_once = lambda *_args, **_kwargs: next(responses)
+            result, meta = CORE.semantic_resegment_chunks(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [], "_semantic_integrity_retries": 1,
+                },
+                lambda *_args: None,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+
+        self.assertTrue(meta["complete"])
+        self.assertEqual(meta["integrity_failures"], 1)
+        self.assertEqual(meta["integrity_retry_count"], 1)
+        self.assertEqual([row["text"] for row in result], ["每個題結束之後", "我會給一個排名"])
 
 
 if __name__ == "__main__":

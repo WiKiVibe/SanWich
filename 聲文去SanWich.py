@@ -9,6 +9,8 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import datetime as _dt
+import gc
+import hashlib
 import importlib.util
 import io
 import json
@@ -30,7 +32,7 @@ from tkinter import filedialog, messagebox
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.4.8"
+APP_VERSION = "2.5b"
 GITHUB_RELEASE_API = "https://api.github.com/repos/WiKiVibe/SanWich/releases/latest"
 GITHUB_TAGS_API = "https://api.github.com/repos/WiKiVibe/SanWich/tags?per_page=1"
 GITHUB_RELEASES_URL = "https://github.com/WiKiVibe/SanWich/releases/latest"
@@ -72,9 +74,12 @@ EXPERIMENTS_PATH = user_data_dir() / "experiments.json"
 EDIT_HISTORY_LEGACY_PATH = ROOT / "logs" / "srt_edit_history.jsonl"
 
 
-def version_tuple(value: str) -> tuple[int, int, int]:
+def version_tuple(value: str) -> tuple[int, int, int, int]:
     numbers = [int(part) for part in re.findall(r"\d+", value or "")[:3]]
-    return tuple((numbers + [0, 0, 0])[:3])
+    base = tuple((numbers + [0, 0, 0])[:3])
+    # 同版號下，beta／alpha／rc 必須低於正式版；否則 2.5b 收不到 2.5 更新。
+    prerelease = bool(re.search(r"(?:alpha|beta|rc|\d[ab](?:\d|$))", value or "", flags=re.I))
+    return (*base, 0 if prerelease else 1)
 
 
 def fetch_latest_release(timeout: float = 5.0) -> dict:
@@ -445,6 +450,8 @@ def _load_core_module(filename: str, module_name: str) -> types.ModuleType | Non
 LEARNING = _load_core_module("learning.py", "SanWich_learning")
 PROMPT_TEMPLATES = _load_core_module("prompt_templates.py", "SanWich_prompt_templates")
 EXPERIMENTS = _load_core_module("experiments.py", "SanWich_experiments")
+LOCAL_LLM = _load_core_module("local_llm.py", "SanWich_local_llm")
+AUDIO_PREVIEW = _load_core_module("audio_preview.py", "SanWich_audio_preview")
 
 # 編輯歷史與學習事件：優先 %APPDATA%，舊 logs/ 一次性遷移
 if LEARNING is not None:
@@ -579,12 +586,15 @@ def license_status_summary() -> dict:
 
 
 DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
+LOCAL_MODELS = [getattr(LOCAL_LLM, "MODEL_LABEL", "Breeze-7B-Instruct v1.0（本機 Q4_K_M）")]
 _LEGACY_OPENROUTER_MODELS = tuple(getattr(CORE, "OPENROUTER_MODELS", ["google/gemma-3-27b-it:free"]))
 _LEGACY_LLM_CALL_ONCE = getattr(CORE, "_llm_call_once")
 
 
 def normalize_provider(provider: str | None) -> str:
     provider = (provider or "gemini").strip().lower()
+    if provider in {"local", "local_llm", "llama.cpp", "llama"}:
+        return "local"
     return "deepseek" if provider == "openrouter" else provider
 
 
@@ -594,6 +604,8 @@ def normalize_model(provider: str | None, model: str | None) -> str:
     if provider == "deepseek":
         if not model or model in _LEGACY_OPENROUTER_MODELS or ":free" in model or "/" in model:
             return DEEPSEEK_MODELS[0]
+    if provider == "local":
+        return LOCAL_MODELS[0]
     return model
 
 
@@ -783,7 +795,30 @@ def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
             "3. 總編輯 Prompt；4. 基礎 AI 校正預設。低優先來源不得覆蓋高優先來源。"
         )
 
-    if provider == "deepseek":
+    if provider == "local":
+        if LOCAL_LLM is None:
+            raise RuntimeError("本地 AI 模組不存在，請重新安裝 SanWich。")
+        endpoint = LOCAL_LLM.MANAGER.ensure_running()
+        result = CORE._post_json(
+            f"{endpoint}/v1/chat/completions",
+            headers={"Content-Type": "application/json"},
+            payload={
+                "model": getattr(LOCAL_LLM, "LOCAL_MODEL_ALIAS", "breeze-local"),
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 2048,
+                "stream": False,
+            },
+            timeout=600,
+        )
+        try:
+            response_text = result["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as exc:
+            raise RuntimeError(f"本地 AI 回應格式異常：{result}") from exc
+    elif provider == "deepseek":
         api_key = (cfg.get("api_key") or "").strip()
         result = CORE._post_json(
             "https://api.deepseek.com/chat/completions",
@@ -840,6 +875,7 @@ GEMINI_MODELS = getattr(
 )
 
 PROVIDER_MODELS = {
+    "local": LOCAL_MODELS,
     "gemini": GEMINI_MODELS,
     "openai": OPENAI_MODELS,
     "claude": CLAUDE_MODELS,
@@ -847,6 +883,7 @@ PROVIDER_MODELS = {
 }
 
 PROVIDER_LABELS = {
+    "local": "本機私密 AI",
     "gemini": "Google Gemini",
     "openai": "OpenAI",
     "claude": "Claude",
@@ -854,6 +891,7 @@ PROVIDER_LABELS = {
 }
 
 PROVIDER_HINTS = {
+    "local": "字幕校對只在這台電腦執行，不需 API Key；首次使用需下載約 5GB 模型與 llama.cpp 執行核心。",
     "gemini": "速度快、免費額度友善，建議優先使用 Gemini 2.5 Flash。",
     "openai": "穩定、通用性高，適合正式內容與較複雜的字幕校對。",
     "claude": "長文理解能力好，適合訪談、講座、議題式內容。",
@@ -861,6 +899,7 @@ PROVIDER_HINTS = {
 }
 
 PROVIDER_SITES = {
+    "local": ("下載／檢查本地 AI", ""),
     "gemini": ("Google AI Studio", "https://aistudio.google.com/apikey"),
     "openai": ("OpenAI API Keys", "https://platform.openai.com/api-keys"),
     "claude": ("Anthropic Console", "https://console.anthropic.com/"),
@@ -964,20 +1003,73 @@ def find_ffplay() -> str | None:
 
 def build_waveform_peaks(media_path: str, target_peaks: int = 6000) -> tuple[list[float], float]:
     peaks, duration, proxy_path = build_waveform_proxy(media_path, target_peaks=target_peaks, keep_proxy=False)
-    if proxy_path:
-        Path(proxy_path).unlink(missing_ok=True)
     return peaks, duration
 
 
+def _preview_cache_dir() -> Path:
+    return user_data_dir() / "cache" / "audio_preview"
+
+
+def _prune_preview_cache(cache_dir: Path, keep_stem: str = "", max_bytes: int = 8 * 1024**3) -> None:
+    """Keep preview proxies bounded without touching the currently opened source."""
+    try:
+        wavs = sorted(cache_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime)
+        total = sum(path.stat().st_size for path in wavs)
+        now = _dt.datetime.now().timestamp()
+        for path in wavs:
+            if path.stem == keep_stem:
+                continue
+            too_old = now - path.stat().st_mtime > 45 * 86400
+            if total <= max_bytes and not too_old:
+                continue
+            size = path.stat().st_size
+            path.unlink(missing_ok=True)
+            path.with_suffix(".json").unlink(missing_ok=True)
+            total -= size
+    except Exception:
+        pass
+
+
 def build_waveform_proxy(media_path: str, target_peaks: int = 6000, keep_proxy: bool = True) -> tuple[list[float], float, str | None]:
-    if not media_path or not Path(media_path).exists():
+    source = Path(media_path) if media_path else Path()
+    if not media_path or not source.exists():
         return [], 0.0, None
     ffmpeg = CORE.find_ffmpeg()
     if not ffmpeg:
         return [], 0.0, None
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    cache_key = ""
+    cache_wav = None
+    cache_meta = None
+    if keep_proxy:
+        try:
+            stat = source.stat()
+            identity = f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{target_peaks}|pcm16k-v2"
+            cache_key = hashlib.sha256(identity.encode("utf-8", errors="surrogatepass")).hexdigest()[:24]
+            cache_dir = _preview_cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_wav = cache_dir / f"{cache_key}.wav"
+            cache_meta = cache_dir / f"{cache_key}.json"
+            if cache_wav.exists() and cache_meta.exists():
+                payload = json.loads(cache_meta.read_text(encoding="utf-8"))
+                peaks = [float(v) for v in payload.get("peaks", [])]
+                duration = float(payload.get("duration", 0.0) or 0.0)
+                if peaks and duration > 0:
+                    cache_wav.touch()
+                    cache_meta.touch()
+                    return peaks, duration, str(cache_wav)
+        except Exception:
+            cache_key = ""
+            cache_wav = None
+            cache_meta = None
+
+    tmp = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".wav",
+        dir=str(cache_wav.parent) if cache_wav is not None else None,
+    )
     tmp.close()
     tmp_path = Path(tmp.name)
+    moved_to_cache = False
     try:
         cmd = [
             ffmpeg,
@@ -1009,21 +1101,22 @@ def build_waveform_proxy(media_path: str, target_peaks: int = 6000, keep_proxy: 
             duration = frame_count / sample_rate if frame_count else 0.0
             if frame_count <= 0:
                 return [], duration, str(tmp_path) if keep_proxy else None
-            samples = array("h")
-            samples.frombytes(wav.readframes(frame_count))
-            if sys.byteorder == "big":
-                samples.byteswap()
-        if not samples:
-            return [], duration, str(tmp_path) if keep_proxy else None
-        bucket = max(1, len(samples) // max(1, target_peaks))
-        # 長訪談若每 0.4 秒只取單一最大峰值，母帶壓縮後幾乎每格都會碰頂，
-        # 波形就會變成整片實心。改用抽樣平均絕對振幅，保留語音強弱與停頓。
-        levels: list[float] = []
-        for i in range(0, len(samples), bucket):
-            end = min(len(samples), i + bucket)
-            stride = max(1, (end - i) // 384)
-            values = [abs(samples[j]) for j in range(i, end, stride)]
-            levels.append(sum(values) / len(values) if values else 0.0)
+            bucket = max(1, frame_count // max(1, target_peaks))
+            # 逐桶讀取，避免長訪談一次把整支 PCM 載入記憶體。
+            levels: list[float] = []
+            remaining = frame_count
+            while remaining > 0:
+                count = min(bucket, remaining)
+                samples = array("h")
+                samples.frombytes(wav.readframes(count))
+                if sys.byteorder == "big":
+                    samples.byteswap()
+                if not samples:
+                    break
+                stride = max(1, len(samples) // 384)
+                values = [abs(samples[j]) for j in range(0, len(samples), stride)]
+                levels.append(sum(values) / len(values) if values else 0.0)
+                remaining -= count
         ordered = sorted(levels)
         if not ordered:
             return [], duration, str(tmp_path) if keep_proxy else None
@@ -1031,11 +1124,22 @@ def build_waveform_proxy(media_path: str, target_peaks: int = 6000, keep_proxy: 
         reference = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
         span = max(1.0, reference - floor)
         peaks = [max(0.0, min(1.0, (level - floor) / span)) for level in levels]
-        return peaks, duration, str(tmp_path) if keep_proxy else None
+        if keep_proxy and cache_wav is not None and cache_meta is not None:
+            os.replace(tmp_path, cache_wav)
+            moved_to_cache = True
+            meta_tmp = cache_meta.with_suffix(".json.tmp")
+            meta_tmp.write_text(
+                json.dumps({"duration": duration, "peaks": peaks}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(meta_tmp, cache_meta)
+            _prune_preview_cache(cache_wav.parent, keep_stem=cache_wav.stem)
+            return peaks, duration, str(cache_wav)
+        return peaks, duration, None
     except Exception:
         return [], 0.0, None
     finally:
-        if not keep_proxy:
+        if not moved_to_cache:
             tmp_path.unlink(missing_ok=True)
 
 
@@ -1415,6 +1519,14 @@ class App(ctk.CTk):
         self.batch_results: list[dict] = []
         self.editor_index: int | None = None
         self.preview_process: subprocess.Popen | None = None
+        self.preview_player = None
+        if AUDIO_PREVIEW is not None:
+            try:
+                candidate = AUDIO_PREVIEW.AudioPreviewPlayer(latency=0.03, blocksize=256)
+                if candidate.available():
+                    self.preview_player = candidate
+            except Exception:
+                self.preview_player = None
         self.notes_placeholder = True
         # 專案列：有明確選過專案就預設收合成細長條
         self.project_bar_expanded = True
@@ -2641,12 +2753,12 @@ class App(ctk.CTk):
         outer.pack(fill="both", expand=True, padx=24, pady=24)
         outer.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(outer, text="API 設定", text_color=TEXT_ON_DARK, font=(FONT, 26, "bold")).grid(
+        ctk.CTkLabel(outer, text="AI 校對設定", text_color=TEXT_ON_DARK, font=(FONT, 26, "bold")).grid(
             row=0, column=0, sticky="w", padx=24, pady=(22, 6)
         )
         ctk.CTkLabel(
             outer,
-            text="Key 儲存在 %APPDATA%\\SanWich\\config.json；更新不會覆寫。啟用 AI 校對時字幕文字會傳送到所選供應商。",
+            text="選擇本機私密 AI 時字幕不離開電腦；選擇雲端供應商時，字幕文字才會傳送至該供應商。",
             text_color=MUTED_ON_DARK,
             font=(FONT, 13),
         ).grid(row=1, column=0, sticky="w", padx=24, pady=(0, 18))
@@ -2658,7 +2770,7 @@ class App(ctk.CTk):
 
         provider = ctk.CTkSegmentedButton(
             outer,
-            values=["gemini", "openai", "claude", "deepseek"],
+            values=["local", "gemini", "openai", "claude", "deepseek"],
             variable=provider_var,
             selected_color=ORANGE,
             selected_hover_color=ORANGE_DARK,
@@ -2705,7 +2817,8 @@ class App(ctk.CTk):
         )
         model_menu.grid(row=5, column=0, sticky="ew", padx=24)
 
-        ctk.CTkLabel(outer, text="API Key", text_color=TEXT_ON_DARK, font=(FONT, 14, "bold")).grid(
+        key_label = ctk.CTkLabel(outer, text="API Key", text_color=TEXT_ON_DARK, font=(FONT, 14, "bold"))
+        key_label.grid(
             row=6, column=0, sticky="w", padx=24, pady=(18, 6)
         )
         key_row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -2726,7 +2839,7 @@ class App(ctk.CTk):
         def toggle_key():
             key_entry.configure(show="" if show_key.get() else "●")
 
-        ctk.CTkCheckBox(
+        show_key_checkbox = ctk.CTkCheckBox(
             key_row,
             text="顯示",
             variable=show_key,
@@ -2734,7 +2847,8 @@ class App(ctk.CTk):
             fg_color=ORANGE,
             hover_color=ORANGE_DARK,
             font=(FONT, 13),
-        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
+        )
+        show_key_checkbox.grid(row=0, column=1, sticky="e", padx=(12, 0))
 
         site_btn = ctk.CTkButton(
             outer,
@@ -2747,6 +2861,41 @@ class App(ctk.CTk):
         )
         site_btn.grid(row=8, column=0, sticky="w", padx=24, pady=(14, 18))
 
+        local_status_label = ctk.CTkLabel(
+            outer,
+            text="",
+            text_color=MUTED_ON_DARK,
+            font=(FONT, 12),
+            anchor="w",
+            justify="left",
+        )
+        local_status_label.grid(row=9, column=0, sticky="ew", padx=24, pady=(0, 8))
+
+        def start_local_download():
+            if LOCAL_LLM is None:
+                messagebox.showerror("本地 AI 不可用", "本地 AI 模組不存在，請重新安裝 SanWich。", parent=win)
+                return
+            site_btn.configure(state="disabled", text="準備下載…")
+
+            def progress(label, done, total):
+                pct = int(done * 100 / total) if total else 0
+                size_text = f"{done / 1024**3:.2f}/{total / 1024**3:.2f} GB" if total else f"{done / 1024**2:.0f} MB"
+                win.after(0, lambda: local_status_label.configure(text=f"{label}：{pct}%（{size_text}）"))
+
+            def worker():
+                try:
+                    status = LOCAL_LLM.MANAGER.ensure_assets(progress_cb=progress, log_fn=lambda msg: self.log(msg, "model"))
+                    gpu_name = str((status.get("gpu") or {}).get("name") or "CPU")
+                    text = f"本地 AI 已備妥｜{status.get('variant')}｜{gpu_name}"
+                    win.after(0, lambda: local_status_label.configure(text=text, text_color=TEAL_2))
+                    win.after(0, lambda: site_btn.configure(state="normal", text="重新檢查本地 AI"))
+                except Exception as exc:
+                    self.log(f"本地 AI 下載失敗：{exc}", "error")
+                    win.after(0, lambda: local_status_label.configure(text=f"下載失敗：{exc}", text_color="#FF8E8E"))
+                    win.after(0, lambda: site_btn.configure(state="normal", text="重試下載本地 AI"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
         def refresh_provider(*_):
             p = provider_var.get()
             models = PROVIDER_MODELS.get(p, GEMINI_MODELS)
@@ -2754,14 +2903,35 @@ class App(ctk.CTk):
             if model_var.get() not in models:
                 model_var.set(models[0])
             hint_label.configure(text=f"{PROVIDER_LABELS.get(p, p)}｜{PROVIDER_HINTS.get(p, '')}")
-            _, url = PROVIDER_SITES.get(p, ("", ""))
-            site_btn.configure(command=lambda u=url: webbrowser.open_new_tab(u) if u else None)
+            if p == "local":
+                key_label.configure(text="API Key（本機模式不需要）")
+                key_entry.configure(state="disabled", placeholder_text="本機模式不需 API Key")
+                show_key_checkbox.configure(state="disabled")
+                site_btn.configure(text="下載／檢查本地 AI", command=start_local_download)
+                if LOCAL_LLM is not None:
+                    status = LOCAL_LLM.MANAGER.status()
+                    local_status_label.configure(
+                        text=(
+                            f"執行核心：{'就緒' if status['runtime_ready'] else '尚未下載'}｜"
+                            f"模型：{'就緒' if status['model_ready'] else '尚未下載'}｜{status['variant']}"
+                        )
+                    )
+            else:
+                key_label.configure(text="API Key")
+                key_entry.configure(state="normal", placeholder_text="")
+                show_key_checkbox.configure(state="normal")
+                local_status_label.configure(text="")
+                label, url = PROVIDER_SITES.get(p, ("開啟申請頁", ""))
+                site_btn.configure(
+                    text="開啟申請頁",
+                    command=lambda u=url: webbrowser.open_new_tab(u) if u else None,
+                )
 
         provider_var.trace_add("write", refresh_provider)
         refresh_provider()
 
         actions = ctk.CTkFrame(outer, fg_color="transparent")
-        actions.grid(row=9, column=0, sticky="ew", padx=24, pady=(8, 22))
+        actions.grid(row=10, column=0, sticky="ew", padx=24, pady=(8, 22))
         actions.grid_columnconfigure(1, weight=1)
 
         def save():
@@ -2944,7 +3114,8 @@ class App(ctk.CTk):
             if self.txt_enabled.get() and not self.output_txt_path.get().strip():
                 self.output_txt_path.set(str(Path(input_files[0]).with_suffix(".txt")))
         self.persist_basic_config()
-        if self.ai_enabled.get() and not (self.cfg.get("api_key") or "").strip():
+        selected_provider = normalize_provider(self.cfg.get("api_provider", "gemini"))
+        if self.ai_enabled.get() and selected_provider != "local" and not (self.cfg.get("api_key") or "").strip():
             ok = messagebox.askyesno(
                 "尚未設定 API Key",
                 "AI 校對已開啟，但尚未設定 API Key。\n要繼續只輸出原始辨識結果嗎？",
@@ -3143,11 +3314,30 @@ class App(ctk.CTk):
             self.log(f"已修正 {adjusted} 組跨 60 秒分段的重疊時間碼。", "warn")
         return CORE.punctuate_chunks(chunks), "".join(texts)
 
-    def process_one(self, inp: str, srt: str, txt: str, use_llm: bool, context_notes: str,
-                    use_text_fix: bool, diarize: bool = False) -> bool:
+    def release_breeze_pipeline(self):
+        """Release ASR model references and return CUDA memory before local LLM starts."""
+        if self.pipeline is None:
+            return
+        self.log("Breeze：釋放 ASR 模型，準備交接顯示卡記憶體。", "model")
+        pipeline = self.pipeline
+        self.pipeline = None
+        try:
+            del pipeline
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+        except Exception as exc:
+            self.log(f"Breeze 顯存清理提示：{exc}", "warn")
+
+    def prepare_transcription(self, inp: str, diarize: bool = False) -> dict:
+        """Run ASR (and optional diarization) without starting any LLM."""
         wav_path = None
-        ai_incomplete = False
-        semantic_segmented = False
+        audio = None
         try:
             wav_path = CORE.convert_to_wav(inp, self.log)
             self.set_progress(10, "讀取音訊")
@@ -3161,9 +3351,54 @@ class App(ctk.CTk):
             self.log(f"Breeze 完成，共 {len(breeze_text)} 字。", "success")
             self.set_chip(self.breeze_chip, "done")
 
+            speaker_turns = None
+            if diarize and DIARIZATION is not None:
+                try:
+                    self.set_progress(71, "語者分離中（首次需下載模型）")
+                    self.log("語者分離：開始（sherpa-onnx + 3D-Speaker ERes2Net）。", "model")
+                    num_spk = int(self.cfg.get("diarization_num_speakers", 3) or 0)
+
+                    def diar_progress(done_seg, total_seg):
+                        if total_seg:
+                            self.set_progress(71 + int((done_seg / total_seg) * 3), "語者分離中")
+
+                    speaker_turns = DIARIZATION.diarize_array(
+                        audio["array"], audio["sampling_rate"],
+                        num_speakers=(num_spk if num_spk > 0 else None),
+                        models_base=ROOT, log=self.log, progress=diar_progress,
+                    )
+                    self.log("語者分析完成，將在最終字幕套用講者。", "success")
+                except Exception as exc:
+                    self.log(f"語者分離失敗：{exc}", "warn")
+                    speaker_turns = None
+            elif diarize and DIARIZATION is None:
+                self.log("找不到語者分離模組（core/diarization.py）。", "warn")
+
+            return {
+                "chunks": [dict(c) for c in chunks],
+                "breeze_text": breeze_text,
+                "speaker_turns": speaker_turns,
+            }
+        finally:
+            audio = None
+            if wav_path:
+                Path(wav_path).unlink(missing_ok=True)
+
+    def process_one(self, inp: str, srt: str, txt: str, use_llm: bool, context_notes: str,
+                    use_text_fix: bool, diarize: bool = False, prepared: dict | None = None) -> bool:
+        ai_incomplete = False
+        semantic_segmented = False
+        if prepared is None:
+            prepared = self.prepare_transcription(inp, diarize=diarize)
+        chunks = [dict(c) for c in prepared.get("chunks") or []]
+        breeze_text = str(prepared.get("breeze_text") or "")
+        speaker_turns = prepared.get("speaker_turns")
+        try:
             save_text = breeze_text
             before_chunks = [dict(c) for c in chunks]
-            if use_llm and (self.cfg.get("api_key") or "").strip():
+            provider = normalize_provider(self.cfg.get("api_provider", "gemini"))
+            llm_credentials_ready = provider == "local" or bool((self.cfg.get("api_key") or "").strip())
+            if use_llm and llm_credentials_ready:
                 effective_use_text_fix = resolve_editor_prompt_flag(use_text_fix, self.cfg)
                 self.set_chip(self.ai_chip, "running")
                 self.set_progress(75, "AI 校對中")
@@ -3266,29 +3501,14 @@ class App(ctk.CTk):
                 self.set_chip(self.ai_chip, "idle")
 
             spk_chunks = None
-            if diarize and DIARIZATION is not None:
+            if diarize and DIARIZATION is not None and speaker_turns is not None:
                 try:
-                    self.set_progress(96, "語者分離中（首次需下載模型）")
-                    self.log("語者分離：開始（sherpa-onnx + 3D-Speaker ERes2Net）。", "model")
-                    num_spk = int(self.cfg.get("diarization_num_speakers", 3) or 0)
-
-                    def diar_progress(done_seg, total_seg):
-                        if total_seg:
-                            self.set_progress(96 + int((done_seg / total_seg) * 3), "語者分離中")
-
-                    turns = DIARIZATION.diarize_array(
-                        audio["array"], audio["sampling_rate"],
-                        num_speakers=(num_spk if num_spk > 0 else None),
-                        models_base=ROOT, log=self.log, progress=diar_progress,
-                    )
-                    spk_chunks = DIARIZATION.assign_speakers_to_chunks(chunks, turns)
+                    spk_chunks = DIARIZATION.assign_speakers_to_chunks(chunks, speaker_turns)
                     n_spk = DIARIZATION.count_speakers(spk_chunks)
                     self.log(f"語者分離完成，偵測到 {n_spk} 位語者。", "success")
                 except Exception as exc:
-                    self.log(f"語者分離失敗：{exc}", "warn")
+                    self.log(f"語者標籤套用失敗：{exc}", "warn")
                     spk_chunks = None
-            elif diarize and DIARIZATION is None:
-                self.log("找不到語者分離模組（core/diarization.py）。", "warn")
 
             # SRT：可選在文字前加講者標籤（不改時間碼）
             srt_chunks = chunks
@@ -3345,8 +3565,7 @@ class App(ctk.CTk):
             self.set_progress(100, "完成（AI 校對未完整完成）" if ai_incomplete else "完成")
             return not ai_incomplete
         finally:
-            if wav_path:
-                Path(wav_path).unlink(missing_ok=True)
+            prepared = None
 
     def batch_worker(self, jobs, use_llm: bool, context_notes: str, use_text_fix: bool, diarize: bool = False):
         total = len(jobs)
@@ -3354,26 +3573,102 @@ class App(ctk.CTk):
         failed = []
         ai_incomplete_files = []
         try:
-            for idx, (inp, srt, txt) in enumerate(jobs, start=1):
+            provider = normalize_provider(self.cfg.get("api_provider", "gemini"))
+            local_two_stage = bool(use_llm and provider == "local")
+            if local_two_stage:
+                if LOCAL_LLM is None:
+                    raise RuntimeError("本地 AI 模組不存在，請重新安裝 SanWich。")
+                # A server left running from settings or a previous job still owns VRAM.
+                # Stop it before ASR so RTX 2060-class cards never hold both models.
+                LOCAL_LLM.MANAGER.stop()
+                self.set_chip(self.ai_chip, "idle")
+                self.log("本機私密 AI：採兩階段處理，先完成所有 Breeze 轉寫，再釋放顯存後校對。", "model")
+
+                prepared_jobs = []
+                try:
+                    for idx, (inp, srt, txt) in enumerate(jobs, start=1):
+                        if self.cancel_event.is_set():
+                            raise TranscriptionCancelled("已取消")
+                        prefix = f"[轉寫 {idx}/{total}] " if total > 1 else ""
+                        self.log(f"{prefix}開始處理：{inp}")
+                        self.set_progress(0, f"{prefix}準備中")
+                        try:
+                            prepared = self.prepare_transcription(inp, diarize=diarize)
+                            prepared_jobs.append((inp, srt, txt, prepared))
+                        except TranscriptionCancelled:
+                            raise
+                        except Exception as exc:
+                            failed.append(f"{Path(inp).name}：{exc}")
+                            self.log(f"{prefix}錯誤：{exc}", "error")
+                            self.set_chip(self.breeze_chip, "error")
+                finally:
+                    self.release_breeze_pipeline()
+
                 if self.cancel_event.is_set():
                     raise TranscriptionCancelled("已取消")
-                prefix = f"[{idx}/{total}] " if total > 1 else ""
-                self.log(f"{prefix}開始處理：{inp}")
-                self.set_progress(0, f"{prefix}準備中")
-                try:
-                    ai_complete = self.process_one(
-                        inp, srt, txt, use_llm, context_notes, use_text_fix, diarize
-                    )
-                    done += 1
-                    if not ai_complete:
-                        ai_incomplete_files.append(Path(inp).name)
-                except TranscriptionCancelled:
-                    raise
-                except Exception as exc:
-                    failed.append(f"{Path(inp).name}：{exc}")
-                    self.log(f"{prefix}錯誤：{exc}", "error")
-                    self.set_chip(self.breeze_chip, "error")
-                    continue
+
+                local_ready = False
+                if prepared_jobs:
+                    self.set_progress(72, "準備本地私密 AI")
+                    self.set_chip(self.ai_chip, "running")
+                    progress_state = {"last": -10}
+
+                    def local_progress(label, done_bytes, total_bytes):
+                        pct = int(done_bytes * 100 / total_bytes) if total_bytes else 0
+                        if pct >= progress_state["last"] + 10 or pct == 100:
+                            progress_state["last"] = pct
+                            self.log(f"{label}：{pct}%", "model")
+                        self.set_progress(72 + min(3, int(pct * 0.03)), "準備本地私密 AI")
+
+                    try:
+                        LOCAL_LLM.MANAGER.ensure_running(
+                            progress_cb=local_progress,
+                            log_fn=lambda msg: self.log(msg, "model"),
+                        )
+                        local_ready = True
+                    except Exception as exc:
+                        self.log(f"本地 AI 無法啟動：{exc}；仍會儲存 Breeze 原始結果。", "error")
+                        self.set_chip(self.ai_chip, "error")
+
+                for idx, (inp, srt, txt, prepared) in enumerate(prepared_jobs, start=1):
+                    if self.cancel_event.is_set():
+                        raise TranscriptionCancelled("已取消")
+                    prefix = f"[校對 {idx}/{len(prepared_jobs)}] " if len(prepared_jobs) > 1 else ""
+                    self.log(f"{prefix}整理輸出：{inp}")
+                    try:
+                        ai_complete = self.process_one(
+                            inp, srt, txt, local_ready, context_notes, use_text_fix,
+                            diarize, prepared=prepared,
+                        )
+                        done += 1
+                        if not local_ready or not ai_complete:
+                            ai_incomplete_files.append(Path(inp).name)
+                    except TranscriptionCancelled:
+                        raise
+                    except Exception as exc:
+                        failed.append(f"{Path(inp).name}：{exc}")
+                        self.log(f"{prefix}錯誤：{exc}", "error")
+            else:
+                for idx, (inp, srt, txt) in enumerate(jobs, start=1):
+                    if self.cancel_event.is_set():
+                        raise TranscriptionCancelled("已取消")
+                    prefix = f"[{idx}/{total}] " if total > 1 else ""
+                    self.log(f"{prefix}開始處理：{inp}")
+                    self.set_progress(0, f"{prefix}準備中")
+                    try:
+                        ai_complete = self.process_one(
+                            inp, srt, txt, use_llm, context_notes, use_text_fix, diarize
+                        )
+                        done += 1
+                        if not ai_complete:
+                            ai_incomplete_files.append(Path(inp).name)
+                    except TranscriptionCancelled:
+                        raise
+                    except Exception as exc:
+                        failed.append(f"{Path(inp).name}：{exc}")
+                        self.log(f"{prefix}錯誤：{exc}", "error")
+                        self.set_chip(self.breeze_chip, "error")
+                        continue
             if failed:
                 msg = f"已完成 {done}/{total} 個檔案；{len(failed)} 個失敗。\n\n" + "\n".join(failed[:5])
                 self.after(0, lambda: messagebox.showwarning("批次完成", msg))
@@ -3484,6 +3779,11 @@ class App(ctk.CTk):
         return len(records)
 
     def stop_preview(self):
+        if self.preview_player is not None:
+            try:
+                self.preview_player.stop()
+            except Exception:
+                pass
         proc = self.preview_process
         self.preview_process = None
         if proc and proc.poll() is None:
@@ -3492,6 +3792,19 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
+    def destroy(self):
+        if self.preview_player is not None:
+            try:
+                self.preview_player.close()
+            except Exception:
+                pass
+        if LOCAL_LLM is not None:
+            try:
+                LOCAL_LLM.MANAGER.stop()
+            except Exception:
+                pass
+        super().destroy()
+
     def play_srt_segment(self, media_path: str, start: float, end: float):
         if not media_path or not Path(media_path).exists():
             messagebox.showinfo("找不到原始檔", "需要原始音訊或影片檔，才能播放對應片段。")
@@ -3499,12 +3812,18 @@ class App(ctk.CTk):
         if end <= start:
             messagebox.showerror("時間碼錯誤", "結束時間必須晚於開始時間。")
             return
-        player = find_ffplay()
-        if not player:
-            messagebox.showinfo("找不到播放器", "找不到 ffplay.exe，請先確認 FFmpeg 工具完整安裝。")
-            return
         self.stop_preview()
         duration = max(0.1, end - start)
+        if self.preview_player is not None:
+            try:
+                self.preview_player.play(media_path, start, start + duration)
+                return
+            except Exception as exc:
+                self.log(f"低延遲播放器無法使用，暫時改用 ffplay：{exc}", "warn")
+        player = find_ffplay()
+        if not player:
+            messagebox.showinfo("找不到播放器", "找不到低延遲播放器或 ffplay.exe，請重新執行 setup。")
+            return
         cmd = [
             player,
             "-hide_banner",
@@ -3563,7 +3882,7 @@ class App(ctk.CTk):
         selected_indices: set[int] = {0}
         drag_state = {"index": None, "mode": "", "offset": 0.0, "duration": 0.0, "moved": False}
         playhead = {"time": 0.0}
-        playback = {"playing": False, "started_at": None, "started_from": 0.0, "after_id": None}
+        playback = {"playing": False, "started_at": None, "started_from": 0.0, "after_id": None, "embedded": False}
         saved_snapshot = {"chunks": clone_chunks(original_chunks)}
         undo_stack: list[list[dict]] = []
         redo_stack: list[list[dict]] = []
@@ -4654,7 +4973,12 @@ class App(ctk.CTk):
             playback["after_id"] = None
 
         def pause_playback():
-            if playback["playing"] and playback["started_at"] is not None:
+            if playback["playing"] and playback.get("embedded") and self.preview_player is not None:
+                try:
+                    set_playhead(self.preview_player.current_time(), center=False, redraw=False)
+                except Exception:
+                    pass
+            elif playback["playing"] and playback["started_at"] is not None:
                 elapsed = (_dt.datetime.now() - playback["started_at"]).total_seconds()
                 set_playhead(float(playback["started_from"]) + elapsed, center=False, redraw=False)
             playback["playing"] = False
@@ -4665,6 +4989,24 @@ class App(ctk.CTk):
 
         def update_playhead_during_playback():
             if not playback["playing"]:
+                return
+            if playback.get("embedded") and self.preview_player is not None:
+                try:
+                    player_running = self.preview_player.is_playing()
+                    current = min(timeline_duration, self.preview_player.current_time())
+                except Exception:
+                    player_running = False
+                    current = playhead["time"]
+                if not player_running:
+                    set_playhead(current, center=False, redraw=False)
+                    playback["playing"] = False
+                    playback["started_at"] = None
+                    cancel_playback_timer()
+                    update_play_button()
+                    return
+                set_playhead(current, center=False, redraw=False)
+                keep_playhead_visible_for_playback()
+                playback["after_id"] = win.after(16, update_playhead_during_playback)
                 return
             proc = self.preview_process
             if proc is not None and proc.poll() is not None:
@@ -4686,10 +5028,6 @@ class App(ctk.CTk):
             if not playback_source or not Path(playback_source).exists():
                 messagebox.showinfo("找不到原始檔", "需要原始音訊或影片檔，才能從時間軸播放。")
                 return
-            player = find_ffplay()
-            if not player:
-                messagebox.showinfo("找不到播放器", "找不到 ffplay.exe，請先確認 FFmpeg 工具完整安裝。")
-                return
             self.stop_preview()
             start = max(0.0, min(timeline_duration, playhead["time"]))
             # 跟剪輯軟體一致：playhead 在可視範圍內就不動畫面，
@@ -4700,6 +5038,23 @@ class App(ctk.CTk):
             x = 24 + start * px_per_second
             if x < left or x > left + visible - 90:
                 center_on_time(start, ratio=0.2)
+            if self.preview_player is not None:
+                try:
+                    self.preview_player.play(playback_source, start)
+                    playback["playing"] = True
+                    playback["embedded"] = True
+                    playback["started_at"] = None
+                    playback["started_from"] = start
+                    update_play_button()
+                    cancel_playback_timer()
+                    playback["after_id"] = win.after(16, update_playhead_during_playback)
+                    return
+                except Exception as exc:
+                    self.log(f"低延遲播放器無法使用，暫時改用 ffplay：{exc}", "warn")
+            player = find_ffplay()
+            if not player:
+                messagebox.showinfo("找不到播放器", "找不到低延遲播放器或 ffplay.exe，請重新執行 setup。")
+                return
             cmd = [
                 player,
                 "-hide_banner",
@@ -4722,6 +5077,7 @@ class App(ctk.CTk):
                 messagebox.showerror("播放失敗", str(exc))
                 return
             playback["playing"] = True
+            playback["embedded"] = False
             playback["started_at"] = _dt.datetime.now()
             playback["started_from"] = start
             update_play_button()
@@ -5795,8 +6151,6 @@ class App(ctk.CTk):
                 if choice and not save_current(show_message=False):
                     return
             self.stop_preview()
-            if waveform_proxy_path:
-                Path(waveform_proxy_path).unlink(missing_ok=True)
             win.destroy()
 
         foot = ctk.CTkFrame(win, fg_color="transparent")

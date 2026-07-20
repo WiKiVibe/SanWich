@@ -1,7 +1,7 @@
 {
-  "api_provider": "gemini",
+  "api_provider": "local",
   "api_key": "",
-  "model": "gemini-2.5-flash",
+  "model": "Breeze-7B-Instruct v1.0（本機 Q4_K_M）",
   "use_llm": false,
   "use_text_fix": true,
   "txt_diarization_enabled": false,

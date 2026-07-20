@@ -4,7 +4,9 @@ $ErrorActionPreference = "Stop"
 $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PackageDir = (Resolve-Path (Join-Path $AppDir '..\..')).Path
 
-$Target = Join-Path $PackageDir "02_launch.bat"
+$HiddenTarget = Join-Path $PackageDir "run_hidden.vbs"
+$FallbackTarget = Join-Path $PackageDir "02_launch.bat"
+$Target = if (Test-Path -LiteralPath $HiddenTarget) { $HiddenTarget } else { $FallbackTarget }
 $Icon = Join-Path $PackageDir "assets\images\_LOGO.ico"
 
 if (!(Test-Path -LiteralPath $Target)) {
@@ -17,7 +19,12 @@ function New-SanWichShortcut {
     param([string] $Path)
 
     $Shortcut = $Shell.CreateShortcut($Path)
-    $Shortcut.TargetPath = $Target
+    if ([IO.Path]::GetExtension($Target) -ieq '.vbs') {
+        $Shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        $Shortcut.Arguments = '"' + $Target + '"'
+    } else {
+        $Shortcut.TargetPath = $Target
+    }
     $Shortcut.WorkingDirectory = $PackageDir
     $Shortcut.Description = "SanWich"
     if (Test-Path -LiteralPath $Icon) {

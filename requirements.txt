@@ -6,5 +6,6 @@ numpy
 pillow
 safetensors
 sherpa-onnx
+sounddevice
 tkinterdnd2
 transformers

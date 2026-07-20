@@ -235,7 +235,7 @@ REM ------------------------------------------------------------
 echo.
 echo [5/5] Installing app packages...
 
-"%PY%" -m pip install --upgrade transformers accelerate safetensors numpy huggingface_hub jieba tkinterdnd2 customtkinter pillow sherpa-onnx >> "%LOG%" 2>&1
+"%PY%" -m pip install --upgrade transformers accelerate safetensors numpy huggingface_hub jieba tkinterdnd2 customtkinter pillow sherpa-onnx sounddevice >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo     [ERROR] Package install failed. See %LOG%
     goto :END_FAIL

@@ -1,13 +1,24 @@
 # SanWich — API Key 申請教學
 
-> 想開啟 AI 校對，請先申請任一家 API Key，然後填到軟體的「設定（齒輪）→ API Key」。
-> 更新日期：2026-06-17
+## v2.5b：本機私密 AI 不需要 API Key
+
+- 在「設定」選擇 **本機私密 AI**。
+- 按「下載／檢查本地 AI」，或直接開始第一次 AI 校對。
+- 第一次會下載 Breeze-7B GGUF（約 4.54GB）與 llama.cpp 執行核心。
+- 本機 AI 所在磁碟至少要有 7GB 可用空間，建議先保留 10GB。
+- 轉寫時會先完成 Breeze-ASR 並釋放顯存，再啟動本機 LLM 校對，降低 6GB 顯卡同時載入兩個模型的風險。
+- 完成後字幕、Prompt、個人化規則只會送到本機 `127.0.0.1`，不會傳給雲端 LLM。
+- 只有選擇 Gemini、OpenAI、Claude 或 DeepSeek 時，才需要依下列教學申請 API Key。
+
+> 本機私密 AI 不需 Key；只有使用雲端 AI 時，才需申請並填入供應商 API Key。
+> 更新日期：2026-07-18
 
 ---
 
 ## 先看結論
 
-- **首選 Google Gemini**：免費額度通常最友善、速度快、繁中校對也穩。
+- **隱私首選本機私密 AI**：不需 API Key，字幕內容不送往雲端。
+- **雲端首選 Google Gemini**：免費額度通常最友善、速度快、繁中校對也穩。
 - **如果你要改用 DeepSeek**：現在軟體已支援 DeepSeek，可在設定裡直接選 **DeepSeek**。
 - 其他家（OpenAI / Claude / DeepSeek）請依自己的使用習慣與預算選擇。
 

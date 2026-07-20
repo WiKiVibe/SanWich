@@ -1,6 +1,8 @@
 @echo off
+setlocal
 cd /d "%~dp0"
 if exist "app" cd app
+if not exist "logs" mkdir "logs"
 set "PYW=.venv\Scripts\pythonw.exe"
 if not exist "%PYW%" set "PYW=.venv\Scripts\python.exe"
 if not exist "%PYW%" (
@@ -10,4 +12,5 @@ if not exist "%PYW%" (
 )
 set "APP="
 for %%F in ("*SanWich*.py") do set "APP=%%~fF"
-start "" "%PYW%" "%APP%"
+"%PYW%" "%APP%" 1>"logs\main.log" 2>"logs\main_error.log"
+exit /b %errorlevel%

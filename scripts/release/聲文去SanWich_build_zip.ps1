@@ -1,4 +1,4 @@
-param()
+﻿param()
 
 $ErrorActionPreference = "Stop"
 
@@ -20,9 +20,9 @@ $Log = Join-Path $LogDir "build_main_zip.log"
 function Write-CleanConfig {
     param([string] $Path)
     $cfg = [ordered]@{
-        api_provider = "gemini"
+        api_provider = "local"
         api_key = ""
-        model = "gemini-2.5-flash"
+        model = "Breeze-7B-Instruct v1.0（本機 Q4_K_M）"
         use_llm = $false
         use_text_fix = $true
         txt_diarization_enabled = $false
@@ -59,6 +59,8 @@ $MainPy = Get-ChildItem -LiteralPath $Root -Filter *.py |
     Where-Object { $_.Name -like '*SanWich*.py' -and $_.Name -notlike '*build*' } |
     Select-Object -First 1
 $CorePy = Get-ChildItem -LiteralPath (Join-Path $Root 'core') -Filter *.py | Select-Object -First 1
+$AudioPreviewPy = Get-Item -LiteralPath (Join-Path $Root 'core\audio_preview.py')
+$LocalLlmPy = Get-Item -LiteralPath (Join-Path $Root 'core\local_llm.py')
 $SetupBat = Get-Item -LiteralPath (Join-Path $Root '01_setup.bat')
 $ApiDoc = Get-ChildItem -LiteralPath (Join-Path $Root 'docs') -Filter '*.md' |
     Where-Object { $_.Name -like '*API*Key*' } |
@@ -73,7 +75,7 @@ $PythonInstaller = Join-Path $Root "tools\python-3.12.9-amd64.exe"
 
 $SetupTorch = Join-Path $Root "scripts\install\setup_torch.py"
 if (!(Test-Path -LiteralPath $SetupTorch)) { throw "Missing required file: setup_torch.py" }
-foreach ($item in @($MainPy, $CorePy, $SetupBat)) {
+foreach ($item in @($MainPy, $CorePy, $AudioPreviewPy, $LocalLlmPy, $SetupBat)) {
     if ($null -eq $item) {
         throw "Missing required source files for the main package."
     }
@@ -124,6 +126,8 @@ Copy-IfExists (Join-Path $Root "core\prompt_templates.py") (Join-Path $AppCore "
 Copy-IfExists (Join-Path $Root "core\experiments.py") (Join-Path $AppCore "experiments.py")
 Copy-IfExists (Join-Path $Root "core\features.py") (Join-Path $AppCore "features.py")
 Copy-IfExists (Join-Path $Root "core\license_manager.py") (Join-Path $AppCore "license_manager.py")
+Copy-IfExists (Join-Path $Root "core\audio_preview.py") (Join-Path $AppCore "audio_preview.py")
+Copy-IfExists (Join-Path $Root "core\local_llm.py") (Join-Path $AppCore "local_llm.py")
 Copy-IfExists $SetupBat.FullName (Join-Path $AppDir "setup_internal.bat")
 Copy-IfExists (Join-Path $Root "requirements.txt") (Join-Path $AppDir "requirements.txt")
 Copy-IfExists $SetupTorch (Join-Path $AppDir "setup_torch.py")
@@ -131,7 +135,9 @@ Copy-IfExists (Join-Path $Root "core\models\diarization\seg-pyannote-segmentatio
 Copy-IfExists (Join-Path $Root "core\models\diarization\3dspeaker_eres2net_base_zh.onnx") (Join-Path $AppCore "models\diarization\3dspeaker_eres2net_base_zh.onnx")
 Copy-IfExists (Join-Path $Root "scripts\install\download_diar_models.bat") (Join-Path $AppDir "download_diar_models.bat")
 if (Test-Path -LiteralPath $ApiDoc) {
-    Copy-IfExists $ApiDoc (Join-Path $AppDir (Split-Path -Leaf $ApiDoc))
+    # PowerShell 5.1 Compress-Archive may corrupt non-ASCII entry names.
+    # Keep the UTF-8 content, but use a stable ASCII filename in the public ZIP.
+    Copy-IfExists $ApiDoc (Join-Path $AppDir "API_Key_Guide.md")
     Write-Host "API Key guide: included"
     "API Key guide: included" | Add-Content -Encoding UTF8 $Log
 } else {
@@ -205,12 +211,26 @@ $InternalRunText = @(
 ) -join "`r`n"
 Set-Content -Encoding ASCII (Join-Path $AppDir "run_app.bat") -Value $InternalRunText
 
+$InternalVbsText = @'
+Option Explicit
+Dim fso, shell, baseDir, launcher, command
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set shell = CreateObject("WScript.Shell")
+baseDir = fso.GetParentFolderName(WScript.ScriptFullName)
+launcher = fso.BuildPath(baseDir, "run_app.bat")
+command = Chr(34) & launcher & Chr(34)
+shell.Run command, 0, False
+'@
+Set-Content -Encoding ASCII (Join-Path $AppDir "run_hidden.vbs") -Value $InternalVbsText
+
 $ShortcutScriptText = @'
 $ErrorActionPreference = "Stop"
 
 $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PackageDir = Split-Path -Parent $AppDir
-$Target = Join-Path $AppDir "run_app.bat"
+$HiddenTarget = Join-Path $AppDir "run_hidden.vbs"
+$FallbackTarget = Join-Path $AppDir "run_app.bat"
+$Target = if (Test-Path -LiteralPath $HiddenTarget) { $HiddenTarget } else { $FallbackTarget }
 $Icon = Join-Path $AppDir "assets\images\_LOGO.ico"
 
 if (!(Test-Path -LiteralPath $Target)) {
@@ -223,7 +243,12 @@ function New-SanWichShortcut {
     param([string] $Path)
 
     $Shortcut = $Shell.CreateShortcut($Path)
-    $Shortcut.TargetPath = $Target
+    if ([IO.Path]::GetExtension($Target) -ieq '.vbs') {
+        $Shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        $Shortcut.Arguments = '"' + $Target + '"'
+    } else {
+        $Shortcut.TargetPath = $Target
+    }
     $Shortcut.WorkingDirectory = $AppDir
     $Shortcut.Description = "SanWich"
     if (Test-Path -LiteralPath $Icon) {
@@ -275,12 +300,35 @@ $ReadmeBase64 = "6IGy5paH5Y67U2FuV2ljaCDlronoo53ljIUNClNhbldpY2ggaW5zdGFsbGVyIHB
     [System.Text.UTF8Encoding]::new($true)
 )
 
+$ReadmeV25 = @'
+聲文去 SanWich v2.5b 安裝包
+
+1. 請先完整解壓縮整個資料夾，再執行 01_setup.bat。
+2. 安裝完成後，請使用桌面或資料夾內的 SanWich.lnk 啟動。
+3. 捷徑會隱形啟動程式；若啟動失敗，請查看 app\logs\main_error.log。
+4. 第一次轉寫會下載 Breeze-ASR-25，約 3 至 4 GB。
+5. 若在設定中選擇「本機私密 AI」，第一次使用會另外下載約 4.54 GB 的 Breeze-7B GGUF 與 llama.cpp 執行核心。
+6. 本機私密 AI 不需要 API Key，字幕校對只送往這台電腦的 127.0.0.1。
+7. 模型、runtime、個人設定、API Key 與波形快取都不包含在分享 ZIP 內。
+
+本機 AI 首次下載至少需要 7 GB 可用空間，建議預留 10 GB。下載途中關閉程式，下次可以從 .part 檔續傳。
+
+SanWich v2.5b installer package
+
+Extract the whole folder, run 01_setup.bat, then launch SanWich.lnk.
+Local Private AI downloads its model on first use and does not require an API key.
+'@
+[System.IO.File]::WriteAllText(
+    (Join-Path $Stage "README.txt"),
+    $ReadmeV25,
+    [System.Text.UTF8Encoding]::new($true)
+)
+
 $ZipBaseName = "SanWich_setup_v$AppVersion"
 $Zip = Join-Path $Release "$ZipBaseName.zip"
 if (Test-Path -LiteralPath $Zip) {
-    $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $Zip = Join-Path $Release "${ZipBaseName}_$Stamp.zip"
-    "Existing $ZipBaseName.zip found; writing $Zip instead." | Add-Content -Encoding UTF8 $Log
+    Remove-Item -LiteralPath $Zip -Force
+    "Existing $ZipBaseName.zip removed before deterministic rebuild." | Add-Content -Encoding UTF8 $Log
 }
 
 foreach ($directoryName in $ForbiddenPackageDirectories) {

@@ -186,7 +186,7 @@ def load_config() -> dict:
             return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {"api_provider": "gemini", "api_key": "", "model": "gemini-2.5-flash", "use_llm": False, "use_text_fix": False, "output_srt_enabled": True, "output_txt_enabled": True}
+    return {"api_provider": "local", "api_key": "", "model": "Breeze-7B-Instruct v1.0（本機 Q4_K_M）", "use_llm": False, "use_text_fix": False, "output_srt_enabled": True, "output_txt_enabled": True}
 
 def save_config(cfg: dict):
     try:
@@ -1294,7 +1294,7 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
     global LAST_LLM_MERGE_META
     provider = cfg.get("api_provider", "gemini")
     api_key  = (cfg.get("api_key") or "").strip()
-    if not api_key:
+    if not api_key and provider != "local":
         raise ValueError("請先在設定中填入 API Key。")
 
     log_fn(f"AI：使用 {provider} / {cfg.get('model', '（預設）')}")

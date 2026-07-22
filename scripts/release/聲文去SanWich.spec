@@ -59,7 +59,7 @@ excludes = [
 ]
 
 a = Analysis(
-    [str(ROOT / '聲文去SanWich.py')],
+    [str(ROOT / 'SanWich.py')],
     pathex=[str(ROOT)],
     binaries=[],
     datas=datas,

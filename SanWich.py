@@ -1,4 +1,4 @@
-﻿"""
+"""
 SanWich main app - CustomTkinter interface wired to the legacy core.
 
 The legacy core is loaded read-only from an internal support file.
@@ -378,17 +378,6 @@ def find_legacy_path() -> Path:
     preferred = here() / "core" / "SanWich_legacy_core.py"
     if preferred.exists():
         return preferred
-    fallback = here() / "聲文去SanWich.py"
-    if fallback.exists():
-        return fallback
-    for path in here().glob("*.py"):
-        name = path.name.lower()
-        if path.name == Path(__file__).name:
-            continue
-        if path.name == "ui_prototype.py":
-            continue
-        if "sanwich" in name:
-            return path
     raise FileNotFoundError("找不到內部核心檔案 SanWich_legacy_core.py")
 
 
@@ -587,6 +576,7 @@ def license_status_summary() -> dict:
 
 DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
 LOCAL_MODELS = [getattr(LOCAL_LLM, "MODEL_LABEL", "Breeze-7B-Instruct v1.0（本機 Q4_K_M）")]
+PROVIDER_ORDER = ["local", "gemini", "openai", "claude", "deepseek"]
 _LEGACY_OPENROUTER_MODELS = tuple(getattr(CORE, "OPENROUTER_MODELS", ["google/gemma-3-27b-it:free"]))
 _LEGACY_LLM_CALL_ONCE = getattr(CORE, "_llm_call_once")
 
@@ -606,13 +596,82 @@ def normalize_model(provider: str | None, model: str | None) -> str:
             return DEEPSEEK_MODELS[0]
     if provider == "local":
         return LOCAL_MODELS[0]
-    return model
+    allowed = PROVIDER_MODELS.get(provider) if "PROVIDER_MODELS" in globals() else None
+    if allowed and model and model not in allowed:
+        # 未知型號時回落該供應商預設，避免設定頁卡住
+        return allowed[0]
+    return model or (allowed[0] if allowed else model)
+
+
+def _guess_key_home_provider(api_key: str) -> str | None:
+    key = (api_key or "").strip()
+    if not key:
+        return None
+    if key.startswith("AQ.") or key.startswith("AIza"):
+        return "gemini"
+    if key.startswith("sk-ant"):
+        return "claude"
+    # sk- 可能是 OpenAI 或 DeepSeek，無法單靠前綴斷定
+    return None
+
+
+def ensure_provider_memory(cfg: dict) -> dict:
+    """分開記住各供應商的 API Key 與上次選的模型。"""
+    provider = normalize_provider(cfg.get("api_provider", "gemini"))
+    keys = cfg.get("api_keys_by_provider")
+    if not isinstance(keys, dict):
+        keys = {}
+    models = cfg.get("models_by_provider")
+    if not isinstance(models, dict):
+        models = {}
+
+    # 正規化既有字典鍵
+    keys = {normalize_provider(str(k)): str(v or "") for k, v in keys.items()}
+    models = {normalize_provider(str(k)): str(v or "") for k, v in models.items()}
+
+    legacy_key = str(cfg.get("api_key") or "").strip()
+    if legacy_key:
+        home = _guess_key_home_provider(legacy_key)
+        if provider != "local":
+            keys.setdefault(provider, legacy_key)
+        if home:
+            keys.setdefault(home, legacy_key)
+        # 若目前是本機，仍把舊 key 掛到猜到的供應商，避免「換過去 key 空白」
+        if provider == "local" and home:
+            keys.setdefault(home, legacy_key)
+
+    # 預設模型表在 PROVIDER_MODELS 定義之後才完整；此處用已知名單
+    default_models = {
+        "local": LOCAL_MODELS[0] if LOCAL_MODELS else "",
+        "gemini": (GEMINI_MODELS[0] if GEMINI_MODELS else "gemini-3.6-flash"),
+        "openai": (OPENAI_MODELS[0] if OPENAI_MODELS else "gpt-5.6-luna"),
+        "claude": (CLAUDE_MODELS[0] if CLAUDE_MODELS else "claude-haiku-4-5"),
+        "deepseek": DEEPSEEK_MODELS[0],
+    }
+    for name in PROVIDER_ORDER:
+        keys.setdefault(name, "")
+        models.setdefault(name, default_models.get(name, ""))
+        models[name] = normalize_model(name, models.get(name) or default_models.get(name, ""))
+
+    # 目前啟用的供應商／模型／key 寫回主欄位（相容舊程式路徑）
+    cfg["api_provider"] = provider
+    cfg["model"] = normalize_model(provider, models.get(provider) or cfg.get("model"))
+    models[provider] = cfg["model"]
+    if provider == "local":
+        cfg["api_key"] = ""
+    else:
+        cfg["api_key"] = str(keys.get(provider) or "").strip()
+        keys[provider] = cfg["api_key"]
+
+    cfg["api_keys_by_provider"] = keys
+    cfg["models_by_provider"] = models
+    return cfg
 
 
 def normalize_api_cfg(cfg: dict) -> dict:
-    provider = normalize_provider(cfg.get("api_provider", "gemini"))
-    cfg["api_provider"] = provider
-    cfg["model"] = normalize_model(provider, cfg.get("model"))
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg = ensure_provider_memory(cfg)
     return cfg
 
 
@@ -809,7 +868,7 @@ def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
                     {"role": "user", "content": user_msg},
                 ],
                 "temperature": 0.2,
-                "max_tokens": 2048,
+                "max_tokens": 4096,
                 "stream": False,
             },
             timeout=600,
@@ -866,12 +925,12 @@ def _llm_call_once_with_deepseek(system: str, user_msg: str, cfg: dict) -> str:
 CORE._llm_call_once = _llm_call_once_with_deepseek
 
 MEDIA_EXTS = getattr(CORE, "MEDIA_EXTS", {".mp3", ".wav", ".m4a", ".mp4", ".mov", ".mkv", ".flac", ".aac", ".ogg", ".webm"})
-OPENAI_MODELS = getattr(CORE, "OPENAI_MODELS", ["gpt-4o-mini", "gpt-4o"])
-CLAUDE_MODELS = getattr(CORE, "CLAUDE_MODELS", ["claude-sonnet-4-5", "claude-haiku-4-5"])
+OPENAI_MODELS = getattr(CORE, "OPENAI_MODELS", ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"])
+CLAUDE_MODELS = getattr(CORE, "CLAUDE_MODELS", ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"])
 GEMINI_MODELS = getattr(
     CORE,
     "GEMINI_MODELS",
-    ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"],
+    ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"],
 )
 
 PROVIDER_MODELS = {
@@ -892,9 +951,9 @@ PROVIDER_LABELS = {
 
 PROVIDER_HINTS = {
     "local": "字幕校對只在這台電腦執行，不需 API Key；首次使用需下載約 5GB 模型與 llama.cpp 執行核心。",
-    "gemini": "速度快、免費額度友善，建議優先使用 Gemini 2.5 Flash。",
-    "openai": "穩定、通用性高，適合正式內容與較複雜的字幕校對。",
-    "claude": "長文理解能力好，適合訪談、講座、議題式內容。",
+    "gemini": "速度快，字幕校對建議先用 Gemini 3.6 Flash；要壓低成本可選 Flash-Lite。",
+    "openai": "GPT-5.6 Luna 成本較低；Terra 平衡品質與價格；Sol 適合高要求內容。",
+    "claude": "Haiku 最省；Sonnet 兼顧速度與品質；Opus／Fable 適合高難度長文。",
     "deepseek": "OpenAI 相容格式，接法簡單，建議優先使用 deepseek-v4-flash。",
 }
 
@@ -2126,7 +2185,7 @@ class App(ctk.CTk):
             parent,
             "",
             step="3",
-            hint="AI 校對是主要功能；總編輯是進階修字規則。補充資料的專名與大小寫會強制套用。",
+            hint="補充資料可貼整份口播腳本（類似剪映文檔匹配），或短詞庫／「錯 > 對」。腳本會在校對後本機對齊覆寫。",
             hint_color=TEXT_ON_DARK,
             step_action="" if self.setting_step_icon is not None else self.fallback_setting_text,
             step_action_image=self.setting_step_icon,
@@ -2415,7 +2474,15 @@ class App(ctk.CTk):
         ).grid(row=0, column=1, sticky="e")
 
     def install_notes_placeholder(self):
-        text = "例如：受訪者｜黃先生（老黃）\n地點｜北投士林科技園區\n指定拼法｜填入本次要採用的正確名稱與大小寫"
+        text = (
+            "用法一｜整份腳本（推薦，類似剪映文檔匹配）：\n"
+            "【腳本】\n"
+            "直接貼上完整口播逐字稿…\n\n"
+            "用法二｜短詞庫：\n"
+            "痘痘藥\n"
+            "KoDoo TV\n"
+            "痘痘要 > 痘痘藥"
+        )
 
         def show():
             self.notes_box.delete("1.0", "end")
@@ -2763,14 +2830,28 @@ class App(ctk.CTk):
             font=(FONT, 13),
         ).grid(row=1, column=0, sticky="w", padx=24, pady=(0, 18))
 
-        provider_var = ctk.StringVar(value=normalize_provider(self.cfg.get("api_provider", "gemini")))
-        model_var = ctk.StringVar(value=self.cfg.get("model", "gemini-2.5-flash"))
-        key_var = ctk.StringVar(value=self.cfg.get("api_key", ""))
+        self.cfg = ensure_provider_memory(self.cfg)
+        start_provider = normalize_provider(self.cfg.get("api_provider", "gemini"))
+        start_models = PROVIDER_MODELS.get(start_provider, GEMINI_MODELS)
+        start_model = normalize_model(
+            start_provider,
+            (self.cfg.get("models_by_provider") or {}).get(start_provider) or self.cfg.get("model"),
+        )
+        if start_model not in start_models:
+            start_model = start_models[0]
+        start_key = ""
+        if start_provider != "local":
+            start_key = str((self.cfg.get("api_keys_by_provider") or {}).get(start_provider) or self.cfg.get("api_key") or "")
+
+        provider_var = ctk.StringVar(value=start_provider)
+        model_var = ctk.StringVar(value=start_model)
+        key_var = ctk.StringVar(value=start_key)
         show_key = ctk.BooleanVar(value=False)
+        state = {"provider": start_provider, "applying": False}
 
         provider = ctk.CTkSegmentedButton(
             outer,
-            values=["local", "gemini", "openai", "claude", "deepseek"],
+            values=list(PROVIDER_ORDER),
             variable=provider_var,
             selected_color=ORANGE,
             selected_hover_color=ORANGE_DARK,
@@ -2799,7 +2880,7 @@ class App(ctk.CTk):
         )
         model_menu = ctk.CTkOptionMenu(
             outer,
-            values=PROVIDER_MODELS.get(provider_var.get(), GEMINI_MODELS),
+            values=start_models,
             variable=model_var,
             fg_color=DARK_2,
             button_color=DARK_2,
@@ -2871,6 +2952,16 @@ class App(ctk.CTk):
         )
         local_status_label.grid(row=9, column=0, sticky="ew", padx=24, pady=(0, 8))
 
+        memory_hint = ctk.CTkLabel(
+            outer,
+            text="各供應商的 API Key 與模型會分開記住；切換供應商會自動帶入，關閉視窗也會儲存。",
+            text_color=MUTED_ON_DARK,
+            font=(FONT, 12),
+            anchor="w",
+            justify="left",
+        )
+        memory_hint.grid(row=10, column=0, sticky="ew", padx=24, pady=(0, 4))
+
         def start_local_download():
             if LOCAL_LLM is None:
                 messagebox.showerror("本地 AI 不可用", "本地 AI 模組不存在，請重新安裝 SanWich。", parent=win)
@@ -2896,12 +2987,42 @@ class App(ctk.CTk):
 
             threading.Thread(target=worker, daemon=True).start()
 
-        def refresh_provider(*_):
-            p = provider_var.get()
+        def apply_settings_to_cfg(*, log_change: bool = False) -> None:
+            """立刻寫入 self.cfg 與磁碟，讓關閉視窗／切換供應商都會生效。"""
+            p = normalize_provider(provider_var.get())
+            models_list = PROVIDER_MODELS.get(p, GEMINI_MODELS)
+            chosen_model = model_var.get()
+            if chosen_model not in models_list:
+                chosen_model = models_list[0]
+                model_var.set(chosen_model)
+            chosen_model = normalize_model(p, chosen_model)
+            key_value = "" if p == "local" else key_var.get().strip()
+
+            keys = dict(self.cfg.get("api_keys_by_provider") or {})
+            models = dict(self.cfg.get("models_by_provider") or {})
+            if p != "local":
+                keys[p] = key_value
+            models[p] = chosen_model
+
+            self.cfg["api_provider"] = p
+            self.cfg["model"] = chosen_model
+            self.cfg["api_key"] = key_value
+            self.cfg["api_keys_by_provider"] = keys
+            self.cfg["models_by_provider"] = models
+            self.cfg = ensure_provider_memory(self.cfg)
+            self.persist_basic_config()
+            CORE.save_config(self.cfg)
+            if log_change:
+                self.log(f"設定已儲存：{PROVIDER_LABELS.get(p, p)} / {self.cfg['model']}", "success")
+
+        def refresh_provider_ui(p: str) -> None:
             models = PROVIDER_MODELS.get(p, GEMINI_MODELS)
             model_menu.configure(values=models)
-            if model_var.get() not in models:
-                model_var.set(models[0])
+            preferred = str((self.cfg.get("models_by_provider") or {}).get(p) or "")
+            if preferred not in models:
+                preferred = models[0]
+            if model_var.get() != preferred:
+                model_var.set(preferred)
             hint_label.configure(text=f"{PROVIDER_LABELS.get(p, p)}｜{PROVIDER_HINTS.get(p, '')}")
             if p == "local":
                 key_label.configure(text="API Key（本機模式不需要）")
@@ -2917,30 +3038,70 @@ class App(ctk.CTk):
                         )
                     )
             else:
-                key_label.configure(text="API Key")
-                key_entry.configure(state="normal", placeholder_text="")
+                key_label.configure(text=f"API Key（{PROVIDER_LABELS.get(p, p)}）")
+                key_entry.configure(state="normal", placeholder_text=f"此 Key 只給 {PROVIDER_LABELS.get(p, p)} 使用")
                 show_key_checkbox.configure(state="normal")
                 local_status_label.configure(text="")
-                label, url = PROVIDER_SITES.get(p, ("開啟申請頁", ""))
+                _label, url = PROVIDER_SITES.get(p, ("開啟申請頁", ""))
                 site_btn.configure(
                     text="開啟申請頁",
                     command=lambda u=url: webbrowser.open_new_tab(u) if u else None,
                 )
 
-        provider_var.trace_add("write", refresh_provider)
-        refresh_provider()
+        def on_provider_change(*_):
+            if state["applying"]:
+                return
+            new_p = normalize_provider(provider_var.get())
+            old_p = state["provider"]
+            if new_p == old_p:
+                refresh_provider_ui(new_p)
+                return
+            state["applying"] = True
+            try:
+                # 先把舊供應商目前畫面上的 key／模型收進記憶
+                keys = dict(self.cfg.get("api_keys_by_provider") or {})
+                models = dict(self.cfg.get("models_by_provider") or {})
+                if old_p != "local":
+                    keys[old_p] = key_var.get().strip()
+                models[old_p] = model_var.get()
+                self.cfg["api_keys_by_provider"] = keys
+                self.cfg["models_by_provider"] = models
+
+                # 換成新供應商已記住的 key／模型
+                remembered_key = "" if new_p == "local" else str(keys.get(new_p) or "")
+                key_var.set(remembered_key)
+                state["provider"] = new_p
+                refresh_provider_ui(new_p)
+                apply_settings_to_cfg(log_change=True)
+            finally:
+                state["applying"] = False
+
+        def on_model_change(*_):
+            if state["applying"]:
+                return
+            apply_settings_to_cfg(log_change=False)
+
+        def on_key_focus_out(_event=None):
+            if state["applying"]:
+                return
+            apply_settings_to_cfg(log_change=False)
+
+        key_entry.bind("<FocusOut>", on_key_focus_out)
+        provider_var.trace_add("write", on_provider_change)
+        model_var.trace_add("write", on_model_change)
+        refresh_provider_ui(start_provider)
 
         actions = ctk.CTkFrame(outer, fg_color="transparent")
-        actions.grid(row=10, column=0, sticky="ew", padx=24, pady=(8, 22))
+        actions.grid(row=11, column=0, sticky="ew", padx=24, pady=(8, 22))
         actions.grid_columnconfigure(1, weight=1)
 
-        def save():
-            self.cfg["api_provider"] = normalize_provider(provider_var.get())
-            self.cfg["model"] = normalize_model(self.cfg["api_provider"], model_var.get())
-            self.cfg["api_key"] = key_var.get().strip()
-            self.persist_basic_config()
-            CORE.save_config(self.cfg)
-            self.log(f"設定已儲存：{self.cfg['api_provider']} / {self.cfg['model']}", "success")
+        def save_and_close():
+            apply_settings_to_cfg(log_change=True)
+            win.destroy()
+
+        def close_and_save():
+            # 關閉也儲存：避免「切了 deepseek 但按關閉等於沒換」
+            apply_settings_to_cfg(log_change=True)
             win.destroy()
 
         ctk.CTkButton(
@@ -2964,7 +3125,7 @@ class App(ctk.CTk):
             fg_color=ORANGE,
             hover_color=TEAL_2,
             font=(FONT, 15, "bold"),
-            command=save,
+            command=save_and_close,
         ).grid(row=0, column=2, sticky="e", padx=(0, 10))
         ctk.CTkButton(
             actions,
@@ -2975,8 +3136,9 @@ class App(ctk.CTk):
             fg_color="#32333B",
             hover_color="#45464F",
             font=(FONT, 14),
-            command=win.destroy,
+            command=close_and_save,
         ).grid(row=0, column=3, sticky="e")
+        win.protocol("WM_DELETE_WINDOW", close_and_save)
 
         # ── Supporter 狀態與 Key ──────────────────────────────
         supporter = ctk.CTkFrame(outer, fg_color=DARK_2, corner_radius=13)
@@ -3039,7 +3201,7 @@ class App(ctk.CTk):
         ).grid(row=2, column=1, sticky="e", padx=(0, 16), pady=(0, 12))
 
         credits = ctk.CTkFrame(outer, fg_color="transparent")
-        credits.grid(row=11, column=0, sticky="ew", padx=24, pady=(0, 18))
+        credits.grid(row=12, column=0, sticky="ew", padx=24, pady=(0, 18))
         credits.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             credits,
@@ -3384,6 +3546,49 @@ class App(ctk.CTk):
             if wav_path:
                 Path(wav_path).unlink(missing_ok=True)
 
+    def apply_script_document_notes(self, chunks: list[dict], context_notes: str) -> list[dict]:
+        """無 AI 或 AI 失敗時，仍可用完整腳本做文檔匹配覆寫。"""
+        notes = (context_notes or "").strip()
+        if not notes or not hasattr(CORE, "is_script_document"):
+            return chunks
+        try:
+            if not CORE.is_script_document(notes):
+                return chunks
+            script = CORE.extract_script_document(notes)
+            if not script:
+                return chunks
+            texts = [(c.get("text") or "").strip() for c in chunks]
+            new_texts, meta = CORE.document_match_texts(texts, script)
+            reps = CORE.replacements_from_context(notes)
+            phrases = [
+                p for p in CORE.required_phrases_from_context(notes)
+                if len(re.sub(r"\s+", "", p)) <= 24
+            ]
+            terms = CORE.canonical_terms_from_context(notes)
+            out = []
+            for text in new_texts:
+                value = text
+                if reps:
+                    value = CORE.apply_context_replacements(value, reps)
+                if phrases:
+                    value = CORE.apply_context_required_phrases(value, phrases)
+                if terms:
+                    value = CORE.apply_context_canonical_terms(value, terms)
+                out.append(value)
+            updated = [dict(c) for c in chunks]
+            for idx, value in enumerate(out):
+                updated[idx]["text"] = value
+            self.log(
+                f"文檔匹配：已對齊腳本並覆寫 {meta.get('matched', 0)}/"
+                f"{meta.get('matched', 0) + meta.get('unchanged', 0)} 組"
+                f"（平均相似度 {meta.get('avg_score', 0)}）。",
+                "success",
+            )
+            return updated
+        except Exception as exc:
+            self.log(f"文檔匹配略過：{exc}", "warn")
+            return chunks
+
     def process_one(self, inp: str, srt: str, txt: str, use_llm: bool, context_notes: str,
                     use_text_fix: bool, diarize: bool = False, prepared: dict | None = None) -> bool:
         ai_incomplete = False
@@ -3404,6 +3609,11 @@ class App(ctk.CTk):
                 self.set_progress(75, "AI 校對中")
                 if effective_use_text_fix:
                     self.log("AI 總編輯：已強制套用總編輯 Prompt。", "model")
+                elif (context_notes or "").strip():
+                    self.log(
+                        "AI 校對：未開總編輯，但補充資料會以「詞庫」先注入，要求模型主動改音近／形近錯辨。",
+                        "model",
+                    )
                 else:
                     self.log("AI 校對：未啟用總編輯 Prompt，使用純 SRT 格式保護模式。", "model")
                 try:
@@ -3449,39 +3659,52 @@ class App(ctk.CTk):
                         if coverage_complete:
                             self.set_chip(self.ai_chip, "done")
                             self.log(f"AI 校對完整完成，共 {len(llm_plain)} 字。", "success")
-                            try:
-                                self.set_progress(94, "AI 語意斷句中")
-
-                                def segmentation_progress(window_i, total):
-                                    pct = 94 + int((window_i / max(total, 1)) * 2)
-                                    self.set_progress(pct, f"AI 語意斷句第 {window_i + 1}/{total} 段")
-
-                                semantic_chunks, semantic_meta = CORE.semantic_resegment_chunks(
-                                    after_chunks,
-                                    llm_cfg,
-                                    self.log,
-                                    target_width=self.srt_max_line_width(),
-                                    progress_cb=segmentation_progress,
+                            # 本機 7B 語意斷句常失敗且極耗時（又是一整輪生成）；改走本機安全斷句。
+                            skip_ai_semantic = provider == "local"
+                            if skip_ai_semantic:
+                                self.log(
+                                    "本機 AI：略過 AI 語意斷句（省時、避免二次漏改字），改用本機安全斷句。",
+                                    "model",
                                 )
-                                if semantic_meta.get("complete") and semantic_chunks:
-                                    chunks = semantic_chunks
-                                    semantic_segmented = True
-                                    self.log(
-                                        f"AI 語意斷句完成：依完整前後文重新規劃為 {len(semantic_chunks)} 組；"
-                                        "文字已通過逐字零增刪驗證。",
-                                        "success",
+                            else:
+                                try:
+                                    self.set_progress(94, "AI 語意斷句中")
+
+                                    def segmentation_progress(window_i, total):
+                                        pct = 94 + int((window_i / max(total, 1)) * 2)
+                                        self.set_progress(pct, f"AI 語意斷句第 {window_i + 1}/{total} 段")
+
+                                    semantic_chunks, semantic_meta = CORE.semantic_resegment_chunks(
+                                        after_chunks,
+                                        llm_cfg,
+                                        self.log,
+                                        target_width=self.srt_max_line_width(),
+                                        progress_cb=segmentation_progress,
                                     )
-                                else:
+                                    if semantic_meta.get("complete") and semantic_chunks:
+                                        chunks = semantic_chunks
+                                        semantic_segmented = True
+                                        self.log(
+                                            f"AI 語意斷句完成：由 {semantic_meta.get('input_count', '?')} 組"
+                                            f"重切為 {len(semantic_chunks)} 組（只改切點，文字未改）。",
+                                            "success",
+                                        )
+                                    else:
+                                        fails = semantic_meta.get("failed_windows") or []
+                                        self.log(
+                                            "AI 語意斷句未通過驗證，整份回退本機安全斷句"
+                                            "（不混用兩種切句風格）。"
+                                            "說明：AI 本來就可以重切不好的斷句；被拒通常是"
+                                            "它順便改了字、或 JSON 格式／截斷問題，"
+                                            f"不是時間碼被鎖死。失敗窗口：{fails or '—'}；"
+                                            f"完整性重試 {semantic_meta.get('integrity_retry_count', 0)} 次。",
+                                            "warn",
+                                        )
+                                except Exception as segmentation_exc:
                                     self.log(
-                                        "AI 語意斷句未通過完整性驗證，整份回退本機安全斷句，"
-                                        "不混用兩種切句風格。",
+                                        f"AI 語意斷句失敗，整份回退本機安全斷句：{segmentation_exc}",
                                         "warn",
                                     )
-                            except Exception as segmentation_exc:
-                                self.log(
-                                    f"AI 語意斷句失敗，整份回退本機安全斷句：{segmentation_exc}",
-                                    "warn",
-                                )
                         else:
                             ai_incomplete = True
                             missing_count = max(0, len(before_chunks) - covered_count)
@@ -3496,8 +3719,17 @@ class App(ctk.CTk):
                     self.log(f"AI 校對失敗：{exc}，改儲存原始辨識結果。", "error")
                     self.set_chip(self.ai_chip, "error")
                     chunks = before_chunks
-                    save_text = breeze_text
+                    chunks = self.apply_script_document_notes(chunks, context_notes)
+                    save_text = CORE.chunks_to_plain(chunks) if hasattr(CORE, "chunks_to_plain") else "\n".join(
+                        (c.get("text") or "").strip() for c in chunks if (c.get("text") or "").strip()
+                    )
             else:
+                # 未開 AI 時，仍可用完整腳本做文檔匹配
+                if (context_notes or "").strip():
+                    chunks = self.apply_script_document_notes(chunks, context_notes)
+                    save_text = CORE.chunks_to_plain(chunks) if hasattr(CORE, "chunks_to_plain") else "\n".join(
+                        (c.get("text") or "").strip() for c in chunks if (c.get("text") or "").strip()
+                    )
                 self.set_chip(self.ai_chip, "idle")
 
             spk_chunks = None

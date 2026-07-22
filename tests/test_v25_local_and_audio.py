@@ -22,18 +22,33 @@ def load_module(name: str, path: Path):
 LOCAL = load_module("sanwich_local_llm_test", ROOT / "core" / "local_llm.py")
 AUDIO = load_module("sanwich_audio_preview_test", ROOT / "core" / "audio_preview.py")
 CORE = load_module("sanwich_core_v25_test", ROOT / "core" / "SanWich_legacy_core.py")
-APP = load_module("sanwich_app_version_test", next(ROOT.glob("*SanWich.py")))
+APP = load_module("sanwich_app_version_test", ROOT / "SanWich.py")
 
 
 class LocalLLMTests(unittest.TestCase):
-    def test_runtime_variant_selects_cuda13_for_rtx50_and_cuda12_for_rtx20(self):
+    def test_runtime_variant_respects_blackwell_driver_cuda_support(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = LOCAL.LocalLLMManager(Path(tmp))
-            manager._run_capture = lambda *_args, **_kwargs: "NVIDIA GeForce RTX 5070, 12282, 600.00"
+            manager.gpu_info = lambda: {
+                "name": "NVIDIA GeForce RTX 5070",
+                "vram_mb": 12282,
+                "driver_cuda": "13.1",
+            }
             self.assertEqual(manager.runtime_variant(), "cuda-13.3")
             self.assertEqual(manager._engine_tuning(), {"context": 8192, "gpu_layers": 99})
 
-            manager._run_capture = lambda *_args, **_kwargs: "NVIDIA GeForce RTX 2060, 6144, 580.00"
+            manager.gpu_info = lambda: {
+                "name": "NVIDIA GeForce RTX 5070",
+                "vram_mb": 12282,
+                "driver_cuda": "12.9",
+            }
+            self.assertEqual(manager.runtime_variant(), "cuda-12.4")
+
+            manager.gpu_info = lambda: {
+                "name": "NVIDIA GeForce RTX 2060",
+                "vram_mb": 6144,
+                "driver_cuda": "13.1",
+            }
             self.assertEqual(manager.runtime_variant(), "cuda-12.4")
             self.assertEqual(manager._engine_tuning(), {"context": 4096, "gpu_layers": 24})
 
@@ -141,6 +156,81 @@ class AudioPreviewTests(unittest.TestCase):
 
 
 class LocalProviderValidationTests(unittest.TestCase):
+    def test_cloud_model_lists_match_current_supported_choices(self):
+        self.assertEqual(
+            APP.OPENAI_MODELS,
+            ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+        )
+        self.assertEqual(
+            APP.CLAUDE_MODELS,
+            ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"],
+        )
+        self.assertEqual(APP.GEMINI_MODELS[0], "gemini-3.6-flash")
+        self.assertNotIn("gemini-2.0-flash", APP.GEMINI_MODELS)
+
+    def test_new_openai_models_use_gpt5_chat_parameters(self):
+        captured = {}
+        original = CORE._post_json
+        try:
+            def fake_post(url, headers, payload, timeout=120):
+                captured.update({"url": url, "payload": payload})
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+            CORE._post_json = fake_post
+            result = CORE._llm_call_once(
+                "system",
+                "user",
+                {"api_provider": "openai", "api_key": "test", "model": "gpt-5.6-luna"},
+            )
+        finally:
+            CORE._post_json = original
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(captured["url"], "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(captured["payload"]["max_completion_tokens"], 8192)
+        self.assertEqual(captured["payload"]["reasoning_effort"], "low")
+        self.assertNotIn("temperature", captured["payload"])
+        self.assertNotIn("max_tokens", captured["payload"])
+
+    def test_gemini3_request_omits_deprecated_sampling_parameters(self):
+        captured = {}
+        original = CORE._post_json
+        try:
+            def fake_post(url, headers, payload, timeout=120):
+                captured.update({"url": url, "payload": payload})
+                return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+            CORE._post_json = fake_post
+            result = CORE._llm_call_once(
+                "system",
+                "user",
+                {"api_provider": "gemini", "api_key": "test", "model": "gemini-3.6-flash"},
+            )
+        finally:
+            CORE._post_json = original
+
+        self.assertEqual(result, "ok")
+        self.assertIn("gemini-3.6-flash:generateContent", captured["url"])
+        self.assertEqual(captured["payload"]["generationConfig"], {"maxOutputTokens": 4096})
+
+    def test_provider_memory_keeps_keys_and_models_separate(self):
+        cfg = APP.normalize_api_cfg(
+            {
+                "api_provider": "deepseek",
+                "api_key": "sk-deepseek-demo",
+                "model": "deepseek-v4-flash",
+            }
+        )
+        cfg["api_keys_by_provider"]["gemini"] = "AIza-gemini-demo"
+        cfg["models_by_provider"]["gemini"] = "gemini-2.5-flash"
+
+        normalized = APP.normalize_api_cfg(cfg)
+
+        self.assertEqual(normalized["api_keys_by_provider"]["deepseek"], "sk-deepseek-demo")
+        self.assertEqual(normalized["api_keys_by_provider"]["gemini"], "AIza-gemini-demo")
+        self.assertEqual(normalized["models_by_provider"]["deepseek"], "deepseek-v4-flash")
+        self.assertEqual(normalized["models_by_provider"]["gemini"], "gemini-2.5-flash")
+
     def test_formal_v25_is_newer_than_v25b(self):
         self.assertTrue(APP.is_newer_version("v2.5", "2.5b"))
         self.assertFalse(APP.is_newer_version("v2.5b", "2.5"))

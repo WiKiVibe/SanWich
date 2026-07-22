@@ -60,6 +60,10 @@ class LocalLLMManager:
         self._process: subprocess.Popen | None = None
         self._port: int | None = None
         self._log_handle = None
+        self._last_gpu_layers: int = 0
+        self._cuda_init_failed: bool = False
+        self._running_on_cpu: bool = False
+        self._variant_override: str | None = None
 
     @property
     def server_path(self) -> Path:
@@ -114,7 +118,7 @@ class LocalLLMManager:
             ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"]
         )
         if not output:
-            return {"name": "", "vram_mb": 0, "driver": ""}
+            return {"name": "", "vram_mb": 0, "driver": "", "driver_cuda": ""}
         first = output.splitlines()[0]
         parts = [part.strip() for part in first.split(",")]
         try:
@@ -125,14 +129,47 @@ class LocalLLMManager:
             "name": parts[0] if parts else "",
             "vram_mb": vram,
             "driver": parts[2] if len(parts) > 2 else "",
+            "driver_cuda": self.driver_cuda_version(),
         }
 
+    def driver_cuda_version(self) -> str:
+        """nvidia-smi 標示的「此驅動最高支援 CUDA 版本」，例如 12.9。"""
+        output = self._run_capture(["nvidia-smi"])
+        match = re.search(r"CUDA\s+Version:\s*([0-9]+(?:\.[0-9]+)?)", output or "")
+        return match.group(1) if match else ""
+
+    def _cuda_version_tuple(self, value: str) -> tuple[int, int]:
+        parts = re.findall(r"\d+", value or "")
+        if not parts:
+            return (0, 0)
+        major = int(parts[0])
+        minor = int(parts[1]) if len(parts) > 1 else 0
+        return (major, minor)
+
     def runtime_variant(self) -> str:
+        """依 GPU 與驅動可支援的 CUDA 版本選擇 llama.cpp 套件。
+
+        重要：CUDA *runtime* 不可高於驅動支援上限。
+        例：驅動 CUDA Version 12.9 時不能用 cuda-13.3 套件，否則會
+        ``ggml_cuda_init: failed to initialize CUDA: (null)`` 並退化成 CPU。
+        """
+        if self._variant_override:
+            return self._variant_override
         gpu = self.gpu_info()
-        name = gpu.get("name", "").lower()
-        if "nvidia" in name or "geforce" in name or "quadro" in name or "rtx" in name:
-            if re.search(r"rtx\s*50\d\d", name) or any(token in name for token in ("blackwell", "b100", "b200")):
-                return "cuda-13.3"
+        name = (gpu.get("name") or "").lower()
+        has_nvidia = any(token in name for token in ("nvidia", "geforce", "quadro", "rtx"))
+        if not has_nvidia:
+            return "cpu"
+
+        driver_cuda = self._cuda_version_tuple(gpu.get("driver_cuda") or self.driver_cuda_version())
+        is_blackwell = bool(
+            re.search(r"rtx\s*50\d\d", name)
+            or any(token in name for token in ("blackwell", "b100", "b200"))
+        )
+        # 驅動支援 CUDA 13+ 才用 13.3；否則一律 12.4（含 RTX 50 + 舊驅動）。
+        if driver_cuda >= (13, 0) and is_blackwell:
+            return "cuda-13.3"
+        if driver_cuda >= (12, 0) or has_nvidia:
             return "cuda-12.4"
         return "cpu"
 
@@ -163,7 +200,37 @@ class LocalLLMManager:
             "gpu": self.gpu_info(),
             "base_dir": str(self.base_dir),
             "model_path": str(self.model_path),
+            "gpu_layers": self._last_gpu_layers,
+            "cuda_init_failed": self._cuda_init_failed,
+            "running_on_cpu": self._running_on_cpu,
         }
+
+    def _recent_log_text(self, max_bytes: int = 24_000) -> str:
+        log_path = self.log_dir / "llama-server.log"
+        try:
+            with log_path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - max_bytes))
+                return handle.read().decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _detect_cuda_failure(self) -> bool:
+        """Inspect recent llama-server log for CUDA init failure after launch."""
+        text = self._recent_log_text()
+        if not text:
+            return False
+        markers = (
+            "failed to initialize CUDA",
+            "ggml_cuda_init: failed",
+            "no CUDA devices found",
+            "CUDA error",
+        )
+        # Prefer the latest launch block if timestamps exist.
+        chunks = re.split(r"\n(?=\[\d{4}-\d{2}-\d{2} )", text)
+        recent = chunks[-1] if chunks else text
+        return any(marker in recent for marker in markers)
 
     def disk_space_status(self) -> dict:
         """Return free-space status for the drive that stores local AI assets."""
@@ -323,6 +390,27 @@ class LocalLLMManager:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
 
+    def installed_variant(self) -> str:
+        try:
+            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            return str(manifest.get("variant") or "")
+        except Exception:
+            return ""
+
+    def reinstall_runtime(self, variant: str | None = None, progress_cb=None, log_fn=None) -> Path:
+        """Stop server, wipe runtime dir, and install a specific llama.cpp variant."""
+        with self._lock:
+            self.stop()
+            if variant:
+                self._variant_override = variant
+            target = self.runtime_variant()
+            if log_fn:
+                log_fn(f"本地 AI：準備重裝執行核心為 {target}（清除舊版 {self.installed_variant() or '無'}）。")
+            if self.runtime_dir.exists():
+                shutil.rmtree(self.runtime_dir, ignore_errors=True)
+            # Force ensure_runtime to download even if partial files remain.
+            return self.ensure_runtime(progress_cb=progress_cb, log_fn=log_fn, preflight=True)
+
     def ensure_runtime(self, progress_cb=None, log_fn=None, *, preflight: bool = True) -> Path:
         with self._lock:
             if self.runtime_ready():
@@ -330,8 +418,18 @@ class LocalLLMManager:
             if preflight:
                 self.preflight_disk_space(log_fn=log_fn)
             variant = self.runtime_variant()
+            installed = self.installed_variant()
+            if installed and installed != variant and log_fn:
+                log_fn(
+                    f"本地 AI：偵測到執行核心版本不符（已裝 {installed}，需要 {variant}），"
+                    "將重新下載以啟用 GPU。"
+                )
             if log_fn:
-                log_fn(f"本地 AI：下載 llama.cpp 官方 {variant} 執行核心。")
+                driver_cuda = self.driver_cuda_version() or "未知"
+                log_fn(
+                    f"本地 AI：下載 llama.cpp 官方 {variant} 執行核心"
+                    f"（驅動最高 CUDA {driver_cuda}）。"
+                )
             release = self._request_json(LLAMA_RELEASE_API)
             assets = self._select_release_assets(release, variant)
             self.download_dir.mkdir(parents=True, exist_ok=True)
@@ -368,6 +466,7 @@ class LocalLLMManager:
                     "variant": variant,
                     "assets": [asset.get("name") for asset in assets],
                     "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "driver_cuda": self.driver_cuda_version(),
                 }
                 self.manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
             finally:
@@ -448,6 +547,31 @@ class LocalLLMManager:
         process = self._process
         return bool(process is not None and process.poll() is None and self._port and self._health_ok(self._port, 0.5))
 
+    def _launch_env(self) -> dict:
+        """Prefer bundled llama CUDA DLLs over any system CUDA Toolkit on PATH.
+
+        RTX 50 / CUDA 13 套件若先載入本機 Toolkit 13.0 的 cudart，可能出現
+        ``failed to initialize CUDA: (null)``，最後退化成極慢的 CPU 推論。
+        """
+        env = os.environ.copy()
+        runtime = str(self.server_path.parent.resolve())
+        path_parts = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+        filtered: list[str] = []
+        for part in path_parts:
+            low = part.replace("/", "\\").lower()
+            # 略過系統 CUDA Toolkit，避免與 llama 內建 cudart/cublas 混用
+            if "nvidia gpu computing toolkit" in low:
+                continue
+            if "\\cuda\\v" in low and "\\bin" in low:
+                continue
+            if part not in filtered:
+                filtered.append(part)
+        env["PATH"] = os.pathsep.join([runtime] + filtered)
+        # 不要沿用可能指向 Toolkit 的 CUDA_PATH
+        for key in ("CUDA_PATH", "CUDA_PATH_V13_0", "CUDA_PATH_V12_4", "CUDA_HOME"):
+            env.pop(key, None)
+        return env
+
     def _launch(self, *, gpu_layers: int, flash_attention: bool, log_fn=None) -> None:
         port = self._find_port()
         tuning = self._engine_tuning()
@@ -467,7 +591,12 @@ class LocalLLMManager:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / "llama-server.log"
         self._log_handle = log_path.open("a", encoding="utf-8")
+        launch_env = self._launch_env()
         self._log_handle.write("\n" + time.strftime("[%Y-%m-%d %H:%M:%S] ") + " ".join(cmd) + "\n")
+        self._log_handle.write(
+            time.strftime("[%Y-%m-%d %H:%M:%S] ")
+            + f"PATH(head)={launch_env.get('PATH', '').split(os.pathsep)[0]}\n"
+        )
         self._log_handle.flush()
         self._process = subprocess.Popen(
             cmd,
@@ -475,17 +604,66 @@ class LocalLLMManager:
             stdout=self._log_handle,
             stderr=subprocess.STDOUT,
             creationflags=self._creationflags(),
+            env=launch_env,
         )
         self._port = port
+        self._last_gpu_layers = int(gpu_layers)
         if log_fn:
             mode = f"GPU layers={gpu_layers}" if gpu_layers else "CPU 備援"
             log_fn(f"本地 AI：正在啟動 {mode}，連接埠 {port}。")
 
+    def _report_runtime_mode(self, *, requested_gpu_layers: int, log_fn=None) -> None:
+        """After health OK, warn clearly if CUDA failed and inference is CPU-like."""
+        cuda_failed = self._detect_cuda_failure()
+        self._cuda_init_failed = cuda_failed
+        on_cpu = (requested_gpu_layers <= 0) or cuda_failed
+        self._running_on_cpu = on_cpu
+        if not log_fn:
+            return
+        gpu = self.gpu_info()
+        gpu_name = gpu.get("name") or "（未偵測到 NVIDIA GPU）"
+        if cuda_failed and requested_gpu_layers > 0:
+            log_fn(
+                f"本地 AI：警告 — CUDA 初始化失敗，雖然啟動參數含 GPU layers={requested_gpu_layers}，"
+                f"但目前很可能以 CPU 推論（顯示卡：{gpu_name}）。"
+                "速度會慢很多，漏回／逾時風險也較高。"
+                "已嘗試優先載入 SanWich 內建 CUDA DLL；若仍失敗請更新 NVIDIA 驅動、"
+                "關閉佔用 VRAM 的程式，或暫時改用 DeepSeek／Gemini 雲端校對。"
+                f"詳見 {self.log_dir / 'llama-server.log'}。"
+            )
+        elif requested_gpu_layers <= 0:
+            log_fn(
+                f"本地 AI：目前為 CPU 備援模式（顯示卡：{gpu_name}）。"
+                "若本機有可用 NVIDIA GPU，建議檢查驅動與 CUDA runtime。"
+            )
+        else:
+            log_fn(
+                f"本地 AI：GPU 模式就緒（layers={requested_gpu_layers}，{gpu_name}）；"
+                f"字幕內容只送往 127.0.0.1:{self._port}。"
+            )
+
     def ensure_running(self, progress_cb=None, log_fn=None, timeout: float = 150.0) -> str:
         with self._lock:
-            if self.is_running():
+            # 舊行程若已是 CUDA 失敗的 CPU 慢速實例，強制重啟以套用新 runtime。
+            if self.is_running() and not self._running_on_cpu and not self._cuda_init_failed:
                 return f"http://127.0.0.1:{self._port}"
-            self.ensure_assets(progress_cb=progress_cb, log_fn=log_fn)
+            if self.is_running() and (self._running_on_cpu or self._cuda_init_failed):
+                if log_fn:
+                    log_fn("本地 AI：偵測到先前 CUDA 失敗／CPU 模式，正在重新啟動以嘗試 GPU…")
+                self.stop()
+
+            # 裝錯 CUDA 大版號時（例如驅動 12.9 卻裝 13.3）自動重裝正確套件。
+            desired = self.runtime_variant()
+            installed = self.installed_variant()
+            if installed and installed != desired:
+                if log_fn:
+                    log_fn(
+                        f"本地 AI：執行核心不符（已裝 {installed} → 需要 {desired}），自動重裝。"
+                    )
+                self.reinstall_runtime(variant=desired, progress_cb=progress_cb, log_fn=log_fn)
+            else:
+                self.ensure_assets(progress_cb=progress_cb, log_fn=log_fn)
+
             tuning = self._engine_tuning()
             attempts = [
                 (int(tuning["gpu_layers"]), True),
@@ -494,6 +672,7 @@ class LocalLLMManager:
             if tuning["gpu_layers"]:
                 attempts.append((0, False))
             last_error = ""
+            cuda_reinstall_tried = False
             for gpu_layers, flash in attempts:
                 self.stop()
                 self._launch(gpu_layers=gpu_layers, flash_attention=flash, log_fn=log_fn)
@@ -503,6 +682,34 @@ class LocalLLMManager:
                         last_error = f"llama-server 結束碼 {self._process.returncode}"
                         break
                     if self._port and self._health_ok(self._port):
+                        # Give the server a moment to flush CUDA init errors into the log.
+                        time.sleep(0.35)
+                        self._report_runtime_mode(requested_gpu_layers=gpu_layers, log_fn=log_fn)
+                        # 若 CUDA 仍失敗且目前是 13.3，降級重裝 12.4 再試一次。
+                        if (
+                            self._cuda_init_failed
+                            and gpu_layers > 0
+                            and not cuda_reinstall_tried
+                            and self.runtime_variant() == "cuda-13.3"
+                        ):
+                            cuda_reinstall_tried = True
+                            if log_fn:
+                                log_fn(
+                                    "本地 AI：cuda-13.3 仍無法初始化 CUDA，改裝 cuda-12.4 重試"
+                                    "（常見於驅動最高僅支援 CUDA 12.x）。"
+                                )
+                            self.stop()
+                            self.reinstall_runtime(
+                                variant="cuda-12.4",
+                                progress_cb=progress_cb,
+                                log_fn=log_fn,
+                            )
+                            # Restart attempt loop with new runtime.
+                            return self.ensure_running(
+                                progress_cb=progress_cb,
+                                log_fn=log_fn,
+                                timeout=timeout,
+                            )
                         if log_fn:
                             log_fn(f"本地 AI：已就緒，字幕內容只送往 127.0.0.1:{self._port}。")
                         return f"http://127.0.0.1:{self._port}"
@@ -518,6 +725,7 @@ class LocalLLMManager:
             process = self._process
             self._process = None
             self._port = None
+            self._last_gpu_layers = 0
             if process is not None and process.poll() is None:
                 try:
                     process.terminate()

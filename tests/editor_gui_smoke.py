@@ -7,7 +7,7 @@ import tkinter as tk
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_PATH = next(ROOT.glob("*SanWich.py"))
+APP_PATH = ROOT / "SanWich.py"
 SPEC = importlib.util.spec_from_file_location("sanwich_app_smoke", APP_PATH)
 APP = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

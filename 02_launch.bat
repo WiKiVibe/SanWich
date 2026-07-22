@@ -10,7 +10,11 @@ if not exist "%PYW%" (
   pause
   exit /b 1
 )
-set "APP="
-for %%F in ("*SanWich*.py") do set "APP=%%~fF"
+set "APP=%CD%\SanWich.py"
+if not exist "%APP%" (
+  echo SanWich.py was not found.
+  pause
+  exit /b 1
+)
 "%PYW%" "%APP%" 1>"logs\main.log" 2>"logs\main_error.log"
 exit /b %errorlevel%

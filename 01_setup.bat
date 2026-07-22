@@ -290,18 +290,7 @@ if /I "%SANWICH_SETUP_TEST%"=="1" (
 echo Starting SanWich...
 
 set "APP_PY=SanWich.py"
-if exist "%APP_PY%" goto :FOUND_APP
-
-set "APP_PY="
-for %%F in ("*SanWich*.py") do (
-    if exist "%%~fF" (
-        set "APP_PY=%%~fF"
-        goto :FOUND_APP
-    )
-)
-
-:FOUND_APP
-if not defined APP_PY (
+if not exist "%APP_PY%" (
     echo [ERROR] Main app file was not found.
     pause
     exit /b 1

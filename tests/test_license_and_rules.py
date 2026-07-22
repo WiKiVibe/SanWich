@@ -88,7 +88,7 @@ class LicenseAndRulesTests(unittest.TestCase):
                 "SANWICH_LICENSE_REGISTRY_DISABLED": "1",
             }
             with mock.patch.dict(os.environ, env, clear=False):
-                app_path = next(ROOT.glob("*SanWich.py"))
+                app_path = ROOT / "SanWich.py"
                 app = load_module("sanwich_app_rule_gate_test", app_path)
                 rules_path = Path(tmp) / "personal_rules.json"
                 store = app.PERSONAL_RULES.RuleStore(rules_path)

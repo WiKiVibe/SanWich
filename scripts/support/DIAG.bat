@@ -25,8 +25,12 @@ py -3 --version >> "%LOG%" 2>&1
 echo. >> "%LOG%"
 echo --- try launch app, capture errors --- >> "%LOG%"
 if exist "app\.venv\Scripts\python.exe" (
-  set "SANWICH_MAIN_RELAUNCHED=1"
-  for %%F in ("app\*SanWich*.py") do "app\.venv\Scripts\python.exe" "%%~fF" >> "%LOG%" 2>&1
+  if exist "app\SanWich.py" (
+    set "SANWICH_MAIN_RELAUNCHED=1"
+    "app\.venv\Scripts\python.exe" "app\SanWich.py" >> "%LOG%" 2>&1
+  ) else (
+    echo skipped ^(no SanWich.py^) >> "%LOG%"
+  )
 ) else (
   echo skipped ^(no venv^) >> "%LOG%"
 )

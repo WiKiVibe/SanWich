@@ -40,7 +40,7 @@
 2. 用你的 Google 帳號登入。
 3. 點 **Create API key**。
 4. 複製產生的 Key（通常是 `AIza...` 開頭）。
-5. 回到軟體 → 供應商選 **Google Gemini** → 貼上 Key → 模型建議選 `gemini-2.5-flash` → 儲存。
+5. 回到軟體 → 供應商選 **Google Gemini** → 貼上 Key → 模型建議選 `gemini-3.6-flash` → 儲存。
 
 ---
 
@@ -82,4 +82,4 @@
 - **跳出「API Key 無效或已過期」**：Key 可能貼錯、複製不完整，或已被刪除。回供應商頁面重新產生一次再貼上。
 - **跳出「今日免費額度已用完」**：通常是免費方案或試用額度已經用完，請明天再試或更換供應商。
 - **跳出「連線逾時／無法連上 API」**：先檢查網路；公司、學校或防毒軟體有時會擋住外部 API。
-- **校對結果怪怪的**：先換一個模型試試看；Gemini 建議 `gemini-2.5-flash`，DeepSeek 建議 `deepseek-v4-flash`。
+- **校對結果怪怪的**：先換一個模型試試看；Gemini 建議 `gemini-3.6-flash`，OpenAI 建議 `gpt-5.6-luna`，Claude 建議 `claude-haiku-4-5`，DeepSeek 建議 `deepseek-v4-flash`。

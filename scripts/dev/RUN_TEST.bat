@@ -9,10 +9,9 @@ if not exist "%PY%" (
   exit /b 1
 )
 
-set "APP="
-for %%F in ("%CD%\*SanWich*.py") do set "APP=%%~fF"
-if not defined APP (
-  echo [ERROR] main app *SanWich*.py not found.
+set "APP=%CD%\SanWich.py"
+if not exist "%APP%" (
+  echo [ERROR] SanWich.py not found.
   pause
   exit /b 1
 )

@@ -105,14 +105,42 @@ SRT_FORMAT_ONLY_PROMPT = (
     "若沒有其他明確修改指令，請盡量保留字幕文字原樣，只維持標準 SRT 格式並直接輸出結果，不要添加解釋。"
 )
 
+# 有補充資料但未開總編輯時使用：避免「盡量保留原文」壓過詞庫。
+SRT_WITH_GLOSSARY_PROMPT = (
+    "你是字幕專名／錯辨校對助手。我會提供標準 SRT 與使用者補充詞庫。\n"
+    "【鋼鐵律令】序號與時間碼鎖死：輸入有幾組就回幾組，不可刪除、合併、改時間碼或跨組搬字。\n"
+    "【補充詞庫是先驗知識，不是可選參考】校對前先讀完詞庫，再逐句檢查字幕：\n"
+    "1. 有寫『錯 → 對』的，字幕出現左側就改成右側。\n"
+    "2. 只列出正確寫法時，若字幕出現音近、形近、同對象的 ASR 錯字、簡繁混用或英文大小寫錯誤，"
+    "只要合理可判斷是同一對象，就改成詞庫中的正確寫法。\n"
+    "3. 不確定時，專名優先採用詞庫寫法，不要自創另一種官方拼法。\n"
+    "4. 與詞庫無關的內容盡量保留，不要摘要、不要大改語氣。\n"
+    "直接輸出校對後的標準 SRT，不要加解釋。"
+)
+
+SUPPLEMENT_GLOSSARY_RULES = (
+    "【補充詞庫使用方式｜最高優先】\n"
+    "使用者補充資料是「這次影片的正確專名／品牌／用語清單」。\n"
+    "請先記住詞庫，再校對字幕，主動找出「有可能就是詞庫裡那個東西」的錯誤寫法並改正。\n"
+    "包含但不限於：音近誤辨、形近錯字、漏字、多字、中英夾雜錯誤、英文大小寫錯誤、"
+    "簡體用語、空格位置錯誤。\n"
+    "只改能合理對上詞庫的地方；不要為了套詞庫而亂改無關句子。\n"
+    "時間碼與字幕組數絕對不可變。"
+)
+
 SEMANTIC_SEGMENTATION_PROMPT = (
     "你是台灣影片剪輯師的口播字幕斷句器。你不是在分析書面文法，而是在找觀眾一眼能讀完的口語意群與說話拍點。\n"
-    "先通讀整段、比較所有可能切點，再選擇整體最自然的組合；不要沿用輸入原本的字幕分段。\n"
+    "【可以做／不可以做】\n"
+    "• 可以、也應該：大幅改「切在哪裡」。原本斷句不好時，請重新規劃 segments，不要沿用輸入原本的字幕分段。\n"
+    "• 不可以：增刪、替換任何字，改字序，或順手校正錯字／專名／空格／標點。你不是校對器。\n"
+    "• 時間軸由本機依「未改動的字元流」重算；你一改字，時間就對不齊，結果會被整段拒絕。\n"
+    "先通讀整段、比較所有可能切點，再選擇整體最自然的組合。\n"
     "每個切點的左右兩側，都應該能各自成為自然、可獨立呈現的口語拍點。若前段只是下一段的主詞、受詞、名詞片語或必要條件，請改找附近更自然的切點。\n"
     "注意時間狀語、話題、主詞、謂語、引述、轉折、重複起頭與新動作的口語拍點。不要只追求書面文法完整，也不要為了句子短而拆散同一個意群。\n"
     "一個意群過長時，可在內部轉折、重複起頭、新動作或新主詞之前切開。常態約 10 至 22 個中文字寬，優先落在 12 至 18 字寬；語意完整的一句即使稍長也不要硬拆。七字寬以下的短段只有在能獨立形成明確轉折、問答或強調拍點時才保留，否則應與相鄰意群合併。當多種切法都自然時，選擇切點較少的組合。\n"
-    "你只能重新分段，不得增加、刪除、替換任何字，也不得改變字序或英文空格。輸入即使有錯字、口誤、贅詞或不自然的英數格式，也必須逐字原樣保留，絕對不要順手校正。\n"
-    "只回傳 JSON，格式必須是：{\"segments\":[\"...\",\"...\"]}\n\n"
+    "輸入即使有錯字、口誤、贅詞或不自然的英數格式，也必須逐字原樣保留；字的問題應在上一階段校對完成，這一輪只動切點。\n"
+    "只回傳 JSON，格式必須是：{\"segments\":[\"...\",\"...\"]}\n"
+    "segments 逐項依序串接後，去掉空白必須與輸入全文完全相同；你只是在同一串字上插入分段。\n\n"
     "【剪輯風格範例一】\n"
     "輸入：我請Siri AI幫我做了一張生日賀卡它居然就直接給我這個這個是逼著我送iPhone當生日禮物還是怎樣它還跟我說它保留了原本的設計\n"
     "輸出：{\"segments\":[\"我請Siri AI\",\"幫我做了一張生日賀卡\",\"它居然就直接給我這個\",\"這個是逼著我送iPhone\",\"當生日禮物還是怎樣\",\"它還跟我說\",\"它保留了原本的設計\"]}\n\n"
@@ -413,7 +441,13 @@ def strip_punct_for_srt(text: str) -> str:
         return f"\ue000{len(protected) - 1}\ue001"
 
     value = _NUMERIC_JOIN_RE.sub(protect_numeric, text or "")
-    value = _SRT_PUNCT_RE.sub("", value)
+    try:
+        # 移除所有非字母、數字與非空白字元（即忽略所有標點符號與特殊符號），避免字幕段落卡符號
+        value = re.sub(r"[^\w\s\ue000\ue001]", "", value)
+    except Exception as e:
+        # 若發生未預期的正則表達式錯誤，記錄錯誤並回傳原本處理過的字串
+        print(f"移除標點符號時發生錯誤：{e}")
+        pass
     for idx, token in enumerate(protected):
         value = value.replace(f"\ue000{idx}\ue001", token)
     return normalize_subtitle_spacing(value)
@@ -970,9 +1004,17 @@ def apply_llm_to_chunks(chunks: list[dict], llm_lines: list[str]) -> list[dict]:
     return result
 
 
-OPENAI_MODELS   = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
-CLAUDE_MODELS   = ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-5"]
-GEMINI_MODELS   = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"]
+OPENAI_MODELS   = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
+CLAUDE_MODELS   = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8", "claude-fable-5"]
+GEMINI_MODELS   = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+]
 OPENROUTER_MODELS = [
     "google/gemma-3-27b-it:free",
     "meta-llama/llama-4-scout:free",
@@ -985,12 +1027,12 @@ PROVIDER_HINTS = {
     "openai": (
         "OpenAI ｜ 付費方案\n"
         "取得 Key：platform.openai.com → API keys\n"
-        "建議模型：gpt-4o-mini（便宜）｜ gpt-4o（品質最佳）"
+        "建議模型：gpt-5.6-luna（省成本）｜ gpt-5.6-terra（均衡）｜ gpt-5.6-sol（高品質）"
     ),
     "claude": (
         "Anthropic Claude ｜ 付費方案（品質最佳、繁中理解強）\n"
         "取得 Key：console.anthropic.com → API Keys\n"
-        "建議模型：claude-haiku-4-5（快速便宜）｜ claude-sonnet-4-5（均衡首選）"
+        "建議模型：claude-haiku-4-5（快速便宜）｜ claude-sonnet-5（均衡首選）"
     ),
     "openrouter": (
         "OpenRouter ｜ 聚合平台，有多個完全免費模型 ★另一免費選項★\n"
@@ -1000,7 +1042,7 @@ PROVIDER_HINTS = {
     "gemini": (
         "Google Gemini ｜ 速度快、智商高，免費額度給得最大方 ★推薦首選★\n"
         "取得 Key：aistudio.google.com → Get API key（免費申請）\n"
-        "建議模型：gemini-2.5-flash（速度與品質首選）"
+        "建議模型：gemini-3.6-flash（速度與品質首選）"
     ),
 }
 
@@ -1152,10 +1194,14 @@ def _llm_call_once(system: str, user_msg: str, cfg: dict) -> str:
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{model}:generateContent?key={api_key}"
         )
+        generation_config = {"maxOutputTokens": 4096}
+        # Gemini 3.x 已淘汰 temperature 等取樣參數；送出會造成 HTTP 400。
+        if not model.startswith("gemini-3"):
+            generation_config["temperature"] = 0.2
         payload = {
             "system_instruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4096},
+            "generationConfig": generation_config,
         }
         result = _post_json(url, headers={"Content-Type": "application/json"}, payload=payload)
         try:
@@ -1186,21 +1232,26 @@ def _llm_call_once(system: str, user_msg: str, cfg: dict) -> str:
 
     else:  # openai
         model = model or OPENAI_MODELS[0]
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_msg},
+            ],
+        }
+        if model.startswith("gpt-5"):
+            payload["max_completion_tokens"] = 8192
+            payload["reasoning_effort"] = "low"
+        else:
+            payload["temperature"] = 0.2
+            payload["max_tokens"] = 4096
         result = _post_json(
             "https://api.openai.com/v1/chat/completions",
             headers={
                 "Content-Type":  "application/json",
                 "Authorization": f"Bearer {api_key}",
             },
-            payload={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user_msg},
-                ],
-                "temperature": 0.2,
-                "max_tokens":  4096,
-            },
+            payload=payload,
         )
         return result["choices"][0]["message"]["content"]
 
@@ -1221,35 +1272,94 @@ def chunks_to_srt_string(chunks_list: list[dict], start_idx: int = 1) -> str:
 _CONTEXT_CANONICAL_TERM_RE = re.compile(
     r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]*(?:[._+\-][A-Za-z0-9]+)*)(?![A-Za-z0-9])"
 )
+_CONTEXT_EN_PHRASE_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]*(?:[._+\-][A-Za-z0-9]+)*(?:\s+[A-Za-z][A-Za-z0-9]*(?:[._+\-][A-Za-z0-9]+)*)+)(?![A-Za-z0-9])"
+)
+_CONTEXT_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,40}")
+_CONTEXT_ARROW_RE = re.compile(
+    r"^(?P<source>.+?)\s*(?:->|=>|→|＞|>|＝|=|：|:|改成|換成|修正為|改為)\s*(?P<target>.+?)$"
+)
+_CONTEXT_LABEL_RE = re.compile(
+    r"^(?:指定拼法|專名|正確|名稱|品牌|人名|產品|用語|詞)\s*[|｜:：]\s*(.+)$"
+)
 
 
-def canonical_terms_from_context(context_notes: str) -> dict[str, str]:
-    """擷取補充資料中的英數專名；相同詞最後出現的拼法具有最高優先權。"""
-    notes = re.sub(
+def _context_notes_without_urls(context_notes: str) -> str:
+    return re.sub(
         r"https?://\S+|www\.\S+|\b\S+@\S+\b",
         " ",
         context_notes or "",
         flags=re.I,
     )
+
+
+def _strip_context_line(raw_line: str) -> str:
+    line = re.sub(r"^\s*[-•*]\s*", "", raw_line or "").strip()
+    label = _CONTEXT_LABEL_RE.match(line)
+    if label:
+        return label.group(1).strip()
+    return line
+
+
+def canonical_terms_from_context(context_notes: str) -> dict[str, str]:
+    """擷取補充資料中的英數專名（含多詞片語）；相同詞最後出現的拼法具有最高優先權。"""
+    notes = _context_notes_without_urls(context_notes)
     terms: dict[str, str] = {}
+    # 多詞英文片語優先，避免只留下拆開的單字。
+    for match in _CONTEXT_EN_PHRASE_RE.finditer(notes):
+        value = re.sub(r"\s+", " ", match.group(1).strip())
+        if len(value) < 3:
+            continue
+        terms[value.casefold()] = value
     for match in _CONTEXT_CANONICAL_TERM_RE.finditer(notes):
         value = match.group(1)
         if len(value) < 2:
             continue
-        terms[value.casefold()] = value
+        folded = value.casefold()
+        # 若已被較長片語覆蓋則跳過（例如 Merry 已在 Merry Journey 內）
+        if any(folded != key and folded in key for key in terms):
+            continue
+        terms[folded] = value
     return terms
 
 
+def required_phrases_from_context(context_notes: str) -> list[str]:
+    """擷取補充資料中「一行一個正確寫法」的必用詞（中英皆可）。
+
+    不含「原文 > 指定」列（那類走 replacements）。用於 prompt 強調與
+    中英混合／中文整詞的確定性套用。
+    """
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for raw_line in (context_notes or "").splitlines():
+        line = _strip_context_line(raw_line)
+        if not line or _CONTEXT_ARROW_RE.match(line):
+            continue
+        # 去掉前後括註說明：KoDoo TV（頻道名）
+        line = re.sub(r"[（(][^）)]*[）)]\s*$", "", line).strip()
+        if not line or len(line) > 80:
+            continue
+        # 排除太像句子的長說明
+        if len(line) > 40 and ("。" in line or "，" in line or "," in line):
+            continue
+        key = re.sub(r"\s+", "", line).casefold()
+        if len(key) < 2 or key in seen:
+            continue
+        seen.add(key)
+        phrases.append(line)
+    return phrases
+
+
 def replacements_from_context(context_notes: str) -> list[tuple[str, str]]:
-    """解析補充資料中每行「原文 > 指定文字」形式的強制替換。"""
+    """解析補充資料中每行「原文 > 指定文字」等形式的強制替換。"""
     mappings: dict[str, tuple[str, str]] = {}
     for raw_line in (context_notes or "").splitlines():
-        line = re.sub(r"^\s*[-•*]\s*", "", raw_line).strip()
-        match = re.match(r"^(.+?)\s*(?:->|=>|→|＞|>|＝|=)\s*(.+?)$", line)
+        line = _strip_context_line(raw_line)
+        match = _CONTEXT_ARROW_RE.match(line)
         if not match:
             continue
-        source = match.group(1).strip()
-        target = match.group(2).strip()
+        source = match.group("source").strip()
+        target = match.group("target").strip()
         if not source or not target or source == target or len(source) > 120 or len(target) > 120:
             continue
         mappings[source.casefold()] = (source, target)
@@ -1273,16 +1383,305 @@ def apply_context_replacements(text: str, replacements: list[tuple[str, str]]) -
 
 
 def apply_context_canonical_terms(text: str, terms: dict[str, str]) -> str:
-    """依使用者補充資料強制套用英數專名大小寫，不碰較長單字的一部分。"""
+    """依使用者補充資料強制套用英數專名大小寫（含多詞），不碰較長單字的一部分。"""
     result = text or ""
     for folded, canonical in sorted(terms.items(), key=lambda item: -len(item[0])):
+        pieces = [re.escape(piece) for piece in folded.split() if piece]
+        if not pieces:
+            continue
+        pattern = r"\s+".join(pieces)
+        if pieces[0][:1].isalnum():
+            pattern = r"(?<![A-Za-z0-9])" + pattern
+        if pieces[-1][-1:].isalnum():
+            pattern += r"(?![A-Za-z0-9])"
         result = re.sub(
-            rf"(?<![A-Za-z0-9]){re.escape(folded)}(?![A-Za-z0-9])",
+            pattern,
             lambda _match, replacement=canonical: replacement,
             result,
             flags=re.I,
         )
     return result
+
+
+def apply_context_required_phrases(text: str, phrases: list[str]) -> str:
+    """對「一行一個正確寫法」做強制套用（含中文近似）。
+
+    - 純英數／含空白英詞：大小寫不敏感整詞（組）替換成指定拼法
+    - 含中文：相同片段優先；否則在句內找長度相近、相似度夠高的窗格替換
+    """
+    result = text or ""
+    for phrase in sorted(phrases, key=lambda item: -len(re.sub(r"\s+", "", item))):
+        clean = phrase.strip()
+        if not clean:
+            continue
+        has_cjk = bool(_CONTEXT_CJK_RUN_RE.search(clean))
+        has_latin = bool(_CONTEXT_CANONICAL_TERM_RE.search(clean))
+        if not has_cjk and has_latin:
+            result = apply_context_canonical_terms(result, {clean.casefold(): clean})
+            continue
+        if has_latin:
+            sub_terms = canonical_terms_from_context(clean)
+            result = apply_context_canonical_terms(result, sub_terms)
+        if has_cjk:
+            compact_target = re.sub(r"\s+", "", clean)
+            if len(compact_target) < 2:
+                continue
+            # 1) 完全相同（允許空白差）
+            loose_parts: list[str] = []
+            buf = ""
+            for ch in clean:
+                if ch.isspace():
+                    if buf:
+                        loose_parts.append(re.escape(buf))
+                        buf = ""
+                    loose_parts.append(r"\s*")
+                elif ch.isascii() and ch.isalnum():
+                    if buf and not (buf[-1].isascii() and buf[-1].isalnum()):
+                        loose_parts.append(re.escape(buf))
+                        buf = ch
+                    else:
+                        buf += ch
+                else:
+                    if buf:
+                        loose_parts.append(re.escape(buf))
+                        buf = ""
+                    loose_parts.append(re.escape(ch))
+            if buf:
+                loose_parts.append(re.escape(buf))
+            pattern = "".join(loose_parts)
+            if pattern and re.search(pattern, result, flags=re.I):
+                result = re.sub(
+                    pattern,
+                    lambda _match, replacement=clean: replacement,
+                    result,
+                    flags=re.I,
+                )
+                continue
+            # 2) 近似：在字幕裡找與正確詞最像的同長度窗格
+            result = _fuzzy_replace_cjk_phrase(result, clean)
+    return result
+
+
+def _char_similarity(a: str, b: str) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _fuzzy_replace_cjk_phrase(text: str, phrase: str, min_ratio: float = 0.72) -> str:
+    """在單句內用近似比對把「像正確專名」的片段換成正確寫法。"""
+    if not text or not phrase:
+        return text or ""
+    target = re.sub(r"\s+", "", phrase)
+    target_key = "".join(ch.casefold() if ch.isascii() and ch.isalpha() else ch for ch in target)
+    n = len(target_key)
+    if n < 2:
+        return text
+
+    # 建立 text 非空白字元流與回映
+    keys: list[str] = []
+    idx_map: list[int] = []
+    for i, ch in enumerate(text):
+        if ch.isspace():
+            continue
+        keys.append(ch.casefold() if ch.isascii() and ch.isalpha() else ch)
+        idx_map.append(i)
+    if len(keys) < max(2, n - 1):
+        return text
+
+    best = None  # (score, ratio, start_k, end_k)
+    # 優先同長度窗格，避免短匹配把正確詞塞進半截
+    for length in range(max(2, n - 1), n + 2):
+        if length > len(keys):
+            continue
+        for start in range(0, len(keys) - length + 1):
+            window = "".join(keys[start:start + length])
+            ratio = _char_similarity(target_key, window)
+            same = 0
+            if length == n:
+                same = sum(1 for a, b in zip(target_key, window) if a == b)
+            # 同長度且只差 1 字：中文 ASR 最常見
+            one_edit = length == n and n >= 3 and same >= n - 1
+            need = 0.66 if one_edit else (min_ratio if n >= 5 else max(min_ratio, 0.8))
+            if ratio < need and not one_edit:
+                continue
+            # 強烈偏好同長度
+            score = ratio - 0.12 * abs(length - n) + (0.08 if one_edit else 0.0)
+            if best is None or score > best[0]:
+                best = (score, ratio, start, start + length)
+
+    if best is None:
+        return text
+    _score, _ratio, sk, ek = best
+    left = text[:idx_map[sk]]
+    right = text[idx_map[ek - 1] + 1:]
+    return left + phrase + right
+
+
+# ── 文檔／腳本匹配（類似剪映「文檔匹配」）─────────────────
+
+_DOCUMENT_MARKER_RE = re.compile(
+    r"^\s*【?\s*(?:腳本|文檔|逐字稿|講稿|稿|完整稿|script|document)\s*】?\s*[:：]?\s*",
+    re.I,
+)
+
+
+def is_script_document(context_notes: str) -> bool:
+    """判斷補充資料是否為整份口播腳本（而非短詞庫）。"""
+    text = (context_notes or "").strip()
+    if not text:
+        return False
+    if _DOCUMENT_MARKER_RE.search(text):
+        return True
+    # 去掉明確替換列後估長度
+    body_lines = []
+    for raw in text.splitlines():
+        line = _strip_context_line(raw)
+        if not line or _CONTEXT_ARROW_RE.match(line):
+            continue
+        body_lines.append(line)
+    body = "\n".join(body_lines).strip()
+    compact = re.sub(r"\s+", "", body)
+    # 短於「幾個專名」但明顯是連貫口播稿
+    if len(compact) >= 45:
+        return True
+    if any(len(re.sub(r"\s+", "", ln)) >= 28 for ln in body_lines):
+        return True
+    # 多行且總字數不算太短
+    if len(body_lines) >= 3 and len(compact) >= 30:
+        return True
+    return False
+
+
+def extract_script_document(context_notes: str) -> str:
+    """抽出可做文檔匹配的腳本正文（保留換行，去掉箭頭替換列與標記）。"""
+    text = (context_notes or "").strip()
+    if not text:
+        return ""
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            lines.append("")
+            continue
+        line = _DOCUMENT_MARKER_RE.sub("", line).strip()
+        cleaned = _strip_context_line(line)
+        if not cleaned:
+            continue
+        if _CONTEXT_ARROW_RE.match(cleaned):
+            continue
+        # 短詞庫列仍可留在腳本裡（通常無害）；過短且很多時由 is_script_document 擋
+        lines.append(cleaned)
+    return "\n".join(lines).strip()
+
+
+def _script_match_key_and_map(script: str) -> tuple[str, str, list[int]]:
+    """回傳 (match_key, cleaned_script, nonspace_index->cleaned_index)。"""
+    cleaned = strip_punct_for_srt(script or "")
+    keys: list[str] = []
+    idx_map: list[int] = []
+    for i, ch in enumerate(cleaned):
+        if ch.isspace():
+            continue
+        keys.append(ch.casefold() if ch.isascii() and ch.isalpha() else ch)
+        idx_map.append(i)
+    return "".join(keys), cleaned, idx_map
+
+
+def _best_script_window(chunk_key: str, script_key: str, cursor: int) -> tuple[int, int, float]:
+    """在腳本剩餘區段找與字幕句最像的窗格，回 (start, end, ratio)。"""
+    n = len(chunk_key)
+    if n <= 0:
+        return cursor, cursor, 1.0
+    if cursor >= len(script_key):
+        return cursor, cursor, 0.0
+    window_limit = min(len(script_key), cursor + max(n * 4, n + 48))
+    best = None  # (score, start, end, ratio)
+    for length in range(max(1, n - 2), n + 3):
+        if length <= 0:
+            continue
+        last_start = window_limit - length
+        if last_start < cursor:
+            continue
+        for start in range(cursor, last_start + 1):
+            sub = script_key[start:start + length]
+            ratio = _char_similarity(chunk_key, sub)
+            # 長度越接近字幕句越好，避免吃掉下句開頭或少吃一字
+            score = ratio - 0.08 * abs(length - n) - 0.001 * (start - cursor)
+            if best is None or score > best[0]:
+                best = (score, start, start + length, ratio)
+    if best is None:
+        return cursor, min(len(script_key), cursor + n), 0.0
+    return best[1], best[2], best[3]
+
+
+def document_match_texts(chunk_texts: list[str], script: str) -> tuple[list[str], dict]:
+    """把各字幕句依序對齊到完整腳本，用腳本文字覆寫（保留時間碼結構由呼叫端負責）。
+
+    類似剪映「文檔匹配」：腳本是正確逐字稿，ASR／模型結果對齊後改成腳本用字。
+    """
+    script_key, cleaned_script, idx_map = _script_match_key_and_map(script)
+    meta = {
+        "enabled": True,
+        "script_chars": len(script_key),
+        "matched": 0,
+        "unchanged": 0,
+        "low_score": 0,
+        "avg_score": 0.0,
+    }
+    if not script_key:
+        meta["enabled"] = False
+        return list(chunk_texts), meta
+
+    cursor = 0
+    scores: list[float] = []
+    out: list[str] = []
+    for raw in chunk_texts:
+        text = (raw or "").strip()
+        if not text:
+            out.append(text)
+            continue
+        chunk_cleaned = strip_punct_for_srt(text)
+        chunk_keys: list[str] = []
+        for ch in chunk_cleaned:
+            if ch.isspace():
+                continue
+            chunk_keys.append(ch.casefold() if ch.isascii() and ch.isalpha() else ch)
+        chunk_key = "".join(chunk_keys)
+        if not chunk_key:
+            out.append(text)
+            continue
+
+        start, end, score = _best_script_window(chunk_key, script_key, cursor)
+        scores.append(score)
+        # 門檻：短句稍嚴、長句稍鬆
+        min_ratio = 0.62 if len(chunk_key) >= 8 else 0.70
+        if end > start and score >= min_ratio and start < len(idx_map):
+            end_idx = min(end, len(idx_map))
+            left_i = idx_map[start]
+            right_i = idx_map[end_idx - 1] + 1
+            piece = cleaned_script[left_i:right_i].strip()
+            if piece:
+                out.append(piece)
+                cursor = end_idx
+                meta["matched"] += 1
+                continue
+        # 對不齊就保留原文，仍小幅推進避免整份卡死
+        out.append(text)
+        meta["unchanged"] += 1
+        if score >= 0.45 and end > start:
+            cursor = max(cursor, end)
+        else:
+            meta["low_score"] += 1
+            # 估略推進，避免後面全部漂掉
+            cursor = min(len(script_key), cursor + max(1, len(chunk_key) // 2))
+
+    meta["avg_score"] = round(sum(scores) / len(scores), 3) if scores else 0.0
+    meta["cursor_end"] = cursor
+    return out, meta
+
 
 def llm_merge(chunks: list[dict], cfg: dict, log_fn,
               context_notes: str = "", use_text_fix: bool = True,
@@ -1299,39 +1698,102 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
 
     log_fn(f"AI：使用 {provider} / {cfg.get('model', '（預設）')}")
 
+    notes_stripped = (context_notes or "").strip()
+    has_supplement = bool(notes_stripped)
+
     # ── 組合 system prompt ────────────────────────────────
+    # 有補充資料時，即使沒開總編輯也不能用「盡量保留原文」壓過詞庫。
     if use_text_fix:
         system = EDITOR_SYSTEM_PROMPT
         if 'TEXT_FIX_PROMPT' in globals():
             system += "\n\n" + TEXT_FIX_PROMPT
         log_fn("AI：已啟動修改指令，將套用總編輯 Prompt。")
+    elif has_supplement:
+        system = SRT_WITH_GLOSSARY_PROMPT
+        log_fn("AI：未開總編輯，但已啟用「補充詞庫校對」模式（會依詞庫修正專名／錯辨）。")
     else:
         system = SRT_FORMAT_ONLY_PROMPT
         log_fn("AI：修改指令關閉，不套用總編輯 Prompt。")
 
-    # 補充資料：不論是否啟用總編輯，都必須送入 AI；指定拼法另外做確定性校驗。
+    # 補充資料：詞庫 與／或 完整腳本（文檔匹配）。
     context_prefix = ""
     context_terms = canonical_terms_from_context(context_notes)
     context_replacements = replacements_from_context(context_notes)
-    if context_notes.strip():
+    script_mode = is_script_document(context_notes)
+    script_body = extract_script_document(context_notes) if script_mode else ""
+    # 文檔模式：長句不當「必用詞」逐條塞 prompt；短詞庫模式才抽 phrases
+    if script_mode:
+        context_phrases = [
+            p for p in required_phrases_from_context(context_notes)
+            if len(re.sub(r"\s+", "", p)) <= 24
+        ]
+    else:
+        context_phrases = required_phrases_from_context(context_notes)
+
+    if has_supplement:
+        system = (system or "") + "\n\n" + SUPPLEMENT_GLOSSARY_RULES
+        if script_mode:
+            system += (
+                "\n\n【文檔／腳本匹配模式】使用者提供的是完整口播腳本（正確逐字稿）。"
+                "請以腳本用字為準修正 ASR 錯字與專名；時間碼與組數不可變，不要重寫成摘要。"
+            )
         canonical_lines = ""
         if context_terms:
-            canonical_lines = (
+            canonical_lines += (
                 "\n【必須逐字採用的英數拼法】\n"
                 + "、".join(context_terms.values())
                 + "\n"
             )
-        context_prefix = (
-            f"【使用者補充資料（最高優先）】\n{context_notes.strip()}\n"
-            f"{canonical_lines}"
-            "補充資料中的人名、專有名詞及英文字母大小寫是指定輸出，"
-            "不得改成模型慣用、官方常見或其他大小寫。每行若使用『原文 > 指定文字』、"
-            "『原文 → 指定文字』或『原文 = 指定文字』，必須將左側完整替換成右側。\n\n"
-        )
+        if context_phrases:
+            canonical_lines += (
+                "\n【正確寫法詞庫｜請主動找音近／形近／ASR 錯辨並改成下列寫法】\n"
+                + "\n".join(f"- {phrase}" for phrase in context_phrases)
+                + "\n"
+            )
+        if context_replacements:
+            canonical_lines += (
+                "\n【必須執行的替換】\n"
+                + "\n".join(f"- {src} → {dst}" for src, dst in context_replacements)
+                + "\n"
+            )
+        if script_mode and script_body:
+            # 腳本可能很長：prompt 放摘要提示，完整對齊交給本機文檔匹配
+            preview = script_body if len(script_body) <= 2500 else (script_body[:2500] + "\n…(腳本後續由本機文檔匹配套用)")
+            context_prefix = (
+                "【完整口播腳本｜正確逐字稿｜最高優先】\n"
+                f"{preview}\n\n"
+                f"{canonical_lines}\n"
+                "使用方式：\n"
+                "• 以腳本用字為準，修正字幕中的錯字／音近／形近／專名。\n"
+                "• 『錯 > 對』列仍須執行。\n"
+                "• 不可改時間碼、不可刪組合併字幕組。\n\n"
+            )
+            log_fn(
+                f"補充資料：偵測為「文檔／腳本匹配」模式"
+                f"（腳本約 {len(''.join(script_body.split()))} 字）；"
+                f"強制替換 {len(context_replacements)} 條、短詞庫 {len(context_phrases)} 個。"
+                "校對後會再跑本機對齊覆寫。"
+            )
+        else:
+            context_prefix = (
+                f"【校對前請先記住的補充詞庫（最高優先）】\n{notes_stripped}\n"
+                f"{canonical_lines}\n"
+                "使用方式：先讀詞庫，再校對下面 SRT。\n"
+                "• 『錯 > 對』：出現左側就改右側。\n"
+                "• 只列正確寫法：字幕裡若有可能是同一對象的錯字／音近／形近／大小寫錯誤，"
+                "請改成詞庫寫法。\n"
+                "• 不要忽略詞庫；也不要改時間碼。\n\n"
+            )
+            log_fn(
+                f"補充詞庫已注入校對："
+                f"強制替換 {len(context_replacements)} 條、"
+                f"英數專名 {len(context_terms)} 個、正確寫法 {len(context_phrases)} 個；"
+                "事後會做近似中文／英文強制套用。"
+            )
         system += (
-            "\n\n【使用者補充資料優先規則】若使用者提供補充資料，其中指定的人名、"
-            "專有名詞與英數大小寫高於一般官方寫法。即使未啟用總編輯，也必須依補充資料"
-            "修正對應文字；除此之外仍保留字幕原文與時間碼。"
+            "\n\n【使用者補充資料優先規則】補充詞庫／腳本高於模型慣用拼法與一般官方寫法。"
+            "即使未啟用總編輯，也必須依補充資料修正可合理對上的文字；"
+            "時間碼與組數不可變。"
         )
 
     # ── 分批處理：同時限制文字、字幕組數與序列化後的 SRT 大小 ──
@@ -1402,8 +1864,13 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
             chunks_to_srt_string([chunks[idx]], start_idx=idx + 1).strip()
             for idx in indices
         )
-        if use_text_fix:
-            return f"{context_prefix}【請校對以下標準 SRT 字幕，嚴禁變動時間碼結構】\n\n{srt_input_text}"
+        if use_text_fix or has_supplement:
+            task = (
+                "【請依補充詞庫校對以下標準 SRT：可改錯字／專名，嚴禁變動時間碼結構】"
+                if has_supplement
+                else "【請校對以下標準 SRT 字幕，嚴禁變動時間碼結構】"
+            )
+            return f"{context_prefix}{task}\n\n{srt_input_text}"
         return f"{context_prefix}【請以相同標準 SRT 格式回傳以下字幕，嚴禁變動時間碼結構】\n\n{srt_input_text}"
 
     def parse_response(raw_response: str, allowed_indices: set[int]) -> set[int]:
@@ -1514,10 +1981,23 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
             "自動補校後仍缺漏；已保留原始文字與時間碼，不能視為完整校對。"
         )
 
-    # 模型偶爾仍會忽略補充資料；回填前再做一次確定性校驗。
+    # 模型偶爾仍會忽略補充資料；回填前做確定性後處理。
+    doc_meta = {"enabled": False}
+    if script_mode and script_body:
+        final_text_results, doc_meta = document_match_texts(final_text_results, script_body)
+        log_fn(
+            f"文檔匹配：已對齊腳本並覆寫 {doc_meta.get('matched', 0)}/"
+            f"{doc_meta.get('matched', 0) + doc_meta.get('unchanged', 0)} 組"
+            f"（平均相似度 {doc_meta.get('avg_score', 0)}）。"
+        )
     if context_replacements:
         final_text_results = [
             apply_context_replacements(text, context_replacements)
+            for text in final_text_results
+        ]
+    if context_phrases:
+        final_text_results = [
+            apply_context_required_phrases(text, context_phrases)
             for text in final_text_results
         ]
     if context_terms:
@@ -1540,6 +2020,7 @@ def llm_merge(chunks: list[dict], cfg: dict, log_fn,
         "total_batches": total_batches,
         "request_count": request_count,
         "retry_count": retry_count,
+        "document_match": doc_meta,
         "partial_retry_count": partial_retry_count,
     }
 
@@ -1589,13 +2070,56 @@ def _semantic_window_text_map(window_chunks: list[dict]) -> tuple[str, list[floa
     return "".join(chars), boundary_times
 
 
+def _semantic_failure_label(exc: BaseException) -> str:
+    """把驗證例外翻成使用者可懂的短標籤（斷句可改切點；失敗多半是改字或格式）。"""
+    text = str(exc or "")
+    if "找不到 JSON" in text or ("JSON" in text and "segments" in text):
+        return "格式問題（JSON／segments）"
+    if "JSON" in text or isinstance(exc, json.JSONDecodeError):
+        return "格式問題（JSON 無效或被截斷）"
+    if "空白字幕段" in text:
+        return "格式問題（出現空白段）"
+    if "增刪、改字或字序" in text or "字數原文" in text:
+        return "文字被改動（應只改切點）"
+    if "無法映射" in text or "未覆蓋" in text:
+        return "切點無法對回原文"
+    if "映射後出現空白" in text:
+        return "切點落在空白處"
+    return "驗證未通過"
+
+
+def _semantic_text_mismatch_detail(source_text: str, joined_canonical: str) -> str:
+    """簡短說明模型字串與原文差在哪（方便 log，不傾印全文）。"""
+    source = re.sub(r"\s+", "", source_text or "")
+    joined = joined_canonical or ""
+    if source == joined:
+        return "字串比對異常"
+    parts = [f"字數原文{len(source)}／模型{len(joined)}"]
+    limit = min(len(source), len(joined))
+    diff_at = next((i for i in range(limit) if source[i] != joined[i]), None)
+    if diff_at is None:
+        diff_at = limit
+    lo = max(0, diff_at - 6)
+    hi = min(max(len(source), len(joined)), diff_at + 6)
+    parts.append(
+        f"首處差異「{source[lo:hi]}」≠「{joined[lo:min(len(joined), hi)]}」"
+    )
+    return "；".join(parts)
+
+
 def _parse_semantic_segments(raw_response: str, source_text: str) -> tuple[list[str], list[int]]:
-    """解析模型切點；文字不是逐字相同就拒絕，輸出內容永遠取自 source。"""
+    """解析模型切點；文字不是逐字相同就拒絕，輸出內容永遠取自 source。
+
+    允許、也預期模型重切（改 segments 邊界）；禁止改字元內容。
+    """
     raw = (raw_response or "").strip()
     match = re.search(r"\{.*\}", raw, flags=re.S)
     if not match:
         raise ValueError("回應中找不到 JSON。")
-    payload = json.loads(match.group(0))
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON 無效或被截斷：{exc}") from exc
     proposed = payload.get("segments") if isinstance(payload, dict) else None
     if not isinstance(proposed, list) or not proposed or not all(isinstance(item, str) for item in proposed):
         raise ValueError("JSON 缺少有效的 segments 陣列。")
@@ -1604,8 +2128,12 @@ def _parse_semantic_segments(raw_response: str, source_text: str) -> tuple[list[
     canonical_parts = [re.sub(r"\s+", "", item) for item in proposed]
     if any(not item for item in canonical_parts):
         raise ValueError("模型產生空白字幕段。")
-    if "".join(canonical_parts) != canonical_source:
-        raise ValueError("模型回傳文字有增刪、改字或字序變動。")
+    joined = "".join(canonical_parts)
+    if joined != canonical_source:
+        raise ValueError(
+            "模型回傳文字有增刪、改字或字序變動。"
+            + _semantic_text_mismatch_detail(source_text, joined)
+        )
 
     # 只採用模型提供的每段字數；真正文字重新從 source 切出，確保零改字。
     source_pos = 0
@@ -1729,12 +2257,23 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
                     time.sleep(delay)
         return raw, error
 
+    log_fn(
+        f"AI 語意斷句：可改切點、不可改字（字元流凍結後重映射時間）。"
+        f"共 {len(windows)} 段窗口。"
+    )
+
     for window_index, window in enumerate(windows):
         if progress_cb:
             progress_cb(window_index, len(windows))
         source_text, time_map = _semantic_window_text_map(window)
+        source_char_count = len(re.sub(r"\s+", "", source_text))
         user_msg = (
-            "【本段唯一可輸出的文字】\n" + source_text
+            "【任務】只重新斷句（改切點）。原本斷句不好時請重切；"
+            "禁止校對、禁止改任何字。\n"
+            f"【約束】非空白字數必須 = {source_char_count}；"
+            "segments 依序串接並去掉空白後須與下文完全相同。\n"
+            "【本段唯一可輸出的文字】\n"
+            f"{source_text}"
         )
         segments = positions = None
         parse_error = None
@@ -1754,23 +2293,33 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
                 if integrity_attempt >= integrity_retry_limit:
                     break
                 integrity_retry_count += 1
+                label = _semantic_failure_label(exc)
                 log_fn(
-                    f"語意斷句第 {window_index + 1}/{len(windows)} 段偷改文字，"
-                    f"已拒絕結果並嚴格重試 ({integrity_attempt + 1}/{integrity_retry_limit})。"
+                    f"語意斷句第 {window_index + 1}/{len(windows)} 段未通過"
+                    f"（{label}）：{exc}；"
+                    f"已拒絕並重試 ({integrity_attempt + 1}/{integrity_retry_limit})。"
+                    "（提醒：可以重切，不能改字。）"
                 )
                 retry_message = (
                     user_msg
-                    + "\n\n【上一回合違規】你增加、刪除、替換或移動了原文。"
-                    "這次只能在『本段唯一可輸出的文字』中插入分段邊界；"
-                    "segments 逐項串接後，除分段外必須與原文逐字相同。"
+                    + "\n\n【上一回合未通過】"
+                    f"{exc}\n"
+                    "請只改 segments 的切開位置。"
+                    "segments 逐項串接並去掉空白後，必須與『本段唯一可輸出的文字』完全相同；"
+                    f"非空白字數必須 = {source_char_count}。"
+                    "不要校正錯字、不要改專名、不要加說明。"
                 )
 
         if request_error is not None or segments is None or positions is None:
             failed_windows.append(window_index + 1)
             if request_error is not None:
-                log_fn(f"警告：語意斷句第 {window_index + 1} 段失敗：{request_error}")
+                log_fn(f"警告：語意斷句第 {window_index + 1} 段請求失敗：{request_error}")
             else:
-                log_fn(f"警告：語意斷句第 {window_index + 1} 段未通過逐字驗證：{parse_error}")
+                label = _semantic_failure_label(parse_error) if parse_error else "驗證未通過"
+                log_fn(
+                    f"警告：語意斷句第 {window_index + 1} 段放棄"
+                    f"（{label}）：{parse_error}"
+                )
             continue
 
         if len(time_map) != len(source_text) + 1:
@@ -1801,6 +2350,17 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
         "target_width": float(target_width),
         "text_preserved": complete,
     }
+    if complete:
+        log_fn(
+            f"AI 語意斷句通過：{len(prepared)} 組原文重切為 {len(result)} 組；"
+            "文字未改、僅切點與時間軸重映射。"
+        )
+    else:
+        log_fn(
+            "AI 語意斷句未完整通過：不是「禁止改斷句」，而是模型回傳無法通過"
+            "「只改切點、字元流不變」驗證（改字／JSON／截斷等）。"
+            "將整份改用本機安全斷句，避免 AI 與本機切句風格混用。"
+        )
     LAST_SEMANTIC_SEGMENTATION_META = meta
     return (result if complete else []), meta
 

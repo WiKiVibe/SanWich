@@ -46,9 +46,26 @@ class SubtitleLogicTests(unittest.TestCase):
             CORE._llm_call_once = original_call
 
         self.assertEqual(result, ["DEMOMARK推出示範眼鏡新功能"])
-        self.assertIn("使用者補充資料（最高優先）", captured[0][1])
+        self.assertIn("DemoMark > DEMOMARK", captured[0][1])
         self.assertLess(captured[0][1].find("DEMOMARK"), captured[0][1].find("00:00:00,000"))
         self.assertIn("補充資料優先規則", captured[0][0])
+
+    def test_script_document_matching_uses_script_spelling(self):
+        matched, meta = CORE.document_match_texts(
+            ["今天介紹 DemoMark", "示範眼鏡的新功能"],
+            "今天介紹 DEMOMARK 示範眼鏡的新功能",
+        )
+
+        self.assertEqual(matched, ["今天介紹DEMOMARK", "示範眼鏡的新功能"])
+        self.assertEqual(meta["matched"], 2)
+        self.assertEqual(meta["low_score"], 0)
+
+    def test_arrow_context_replacement_is_deterministic(self):
+        replacements = CORE.replacements_from_context("痘痘要 > 痘痘藥")
+        self.assertEqual(
+            CORE.apply_context_replacements("痘痘要很好用", replacements),
+            "痘痘藥很好用",
+        )
 
     def test_semantic_boundaries_follow_chinese_phrase_structure(self):
         cases = {

@@ -55,9 +55,7 @@ function Copy-IfExists {
     }
 }
 
-$MainPy = Get-ChildItem -LiteralPath $Root -Filter *.py |
-    Where-Object { $_.Name -like '*SanWich*.py' -and $_.Name -notlike '*build*' } |
-    Select-Object -First 1
+$MainPy = Get-Item -LiteralPath (Join-Path $Root 'SanWich.py')
 $CorePy = Get-ChildItem -LiteralPath (Join-Path $Root 'core') -Filter *.py | Select-Object -First 1
 $AudioPreviewPy = Get-Item -LiteralPath (Join-Path $Root 'core\audio_preview.py')
 $LocalLlmPy = Get-Item -LiteralPath (Join-Path $Root 'core\local_llm.py')
@@ -184,16 +182,7 @@ $InternalRunText = @(
     '  exit /b 1',
     ')',
     'set "APP_PY=SanWich.py"',
-    'if exist "%APP_PY%" goto found_app',
-    'set "APP_PY="',
-    'for %%F in ("*SanWich*.py") do (',
-    '  if exist "%%~fF" (',
-    '    set "APP_PY=%%~fF"',
-    '    goto found_app',
-    '  )',
-    ')',
-    ':found_app',
-    'if not defined APP_PY (',
+    'if not exist "%APP_PY%" (',
     '  echo Main app file not found.',
     '  pause',
     '  exit /b 1',

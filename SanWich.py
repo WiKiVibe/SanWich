@@ -32,7 +32,7 @@ from tkinter import filedialog, messagebox
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "2.5b"
+APP_VERSION = "2.5"
 GITHUB_RELEASE_API = "https://api.github.com/repos/WiKiVibe/SanWich/releases/latest"
 GITHUB_TAGS_API = "https://api.github.com/repos/WiKiVibe/SanWich/tags?per_page=1"
 GITHUB_RELEASES_URL = "https://github.com/WiKiVibe/SanWich/releases/latest"
@@ -49,6 +49,13 @@ def user_data_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "SanWich"
     return Path.home() / ".config" / "SanWich"
+
+
+def local_data_dir() -> Path:
+    if sys.platform.startswith("win"):
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "SanWich"
+    return user_data_dir()
 
 
 def prepare_user_file(filename: str, legacy_path: Path) -> Path:
@@ -525,11 +532,30 @@ def load_license_manager() -> types.ModuleType | None:
 LICENSE_MODULE = load_license_manager()
 
 
+def load_updater() -> types.ModuleType | None:
+    path = here() / "core" / "updater.py"
+    if not path.exists():
+        return None
+    try:
+        source = path.read_text(encoding="utf-8")
+        module = types.ModuleType("SanWich_updater")
+        module.__file__ = str(path)
+        module.__name__ = "SanWich_updater"
+        sys.modules[module.__name__] = module
+        exec(compile(source, str(path), "exec"), module.__dict__)
+        return module
+    except Exception:
+        return None
+
+
+UPDATER = load_updater()
+
+
 def _create_license_manager():
     if LICENSE_MODULE is None:
         return None
     try:
-        return LICENSE_MODULE.LicenseManager()
+        return LICENSE_MODULE.LicenseManager(config_path=CONFIG_PATH, app_version=APP_VERSION)
     except Exception:
         return None
 
@@ -571,7 +597,7 @@ def license_status_summary() -> dict:
             return LICENSE_MANAGER.status_summary()
         except Exception:
             pass
-    return {"mode": "free", "label": "Free", "trial_ends_at": "", "days_left": 0}
+    return {"mode": "free", "label": "基本功能可用", "trial_ends_at": "", "days_left": 0}
 
 
 DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
@@ -1624,7 +1650,9 @@ class App(ctk.CTk):
         self.log(f"版本 v{APP_VERSION}｜學習資料目錄：{user_data_dir() / 'learning'}", "model")
         if not _HAS_DND:
             self.log("拖放套件未載入；仍可使用「選擇檔案」。", "warn")
+        self.after(650, self.show_previous_update_result)
         self.after(1400, self.check_for_updates_async)
+        self.after(2400, self.refresh_license_if_due_async)
 
     def apply_fonts(self):
         global FONT, EN_FONT
@@ -1731,31 +1759,131 @@ class App(ctk.CTk):
         except Exception:
             return None
 
-    def check_for_updates_async(self):
+    def show_previous_update_result(self):
+        path = local_data_dir() / "update_result.json"
+        if not path.exists():
+            return
+        try:
+            result = json.loads(path.read_text(encoding="utf-8-sig"))
+            path.unlink(missing_ok=True)
+        except Exception:
+            return
+        if result.get("status") == "success":
+            version = str(result.get("version") or APP_VERSION)
+            messagebox.showinfo("更新完成", f"SanWich v{version} 已更新完成。\n\nAPI Key、個人設定與授權資料均已保留。", parent=self)
+        elif result.get("status") == "failed":
+            messagebox.showerror("更新失敗", "更新沒有套用，程式已保留或復原原版本。\n\n請改用完整安裝包更新。", parent=self)
+
+    def check_for_updates_async(self, notify_if_current: bool = False):
         def worker():
             try:
                 release = fetch_latest_release()
                 latest = str(release.get("tag_name") or "")
                 if is_newer_version(latest):
                     self.after(0, lambda: self.show_update_notice(release))
+                elif notify_if_current:
+                    self.after(0, lambda: messagebox.showinfo("檢查更新", f"目前已是最新版 v{APP_VERSION}。", parent=self))
             except Exception:
-                pass
+                if notify_if_current:
+                    self.after(0, lambda: messagebox.showerror("無法檢查更新", "目前無法連線更新伺服器，請稍後再試。", parent=self))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def show_update_notice(self, release: dict):
         latest = str(release.get("tag_name") or "").strip()
         url = str(release.get("html_url") or GITHUB_RELEASES_URL)
-        should_open = messagebox.askyesno(
+        asset = UPDATER.select_update_asset(release) if UPDATER is not None else None
+        packaged_layout = here().name.lower() == "app" and (here() / "update_helper.ps1").is_file()
+        can_install = bool(asset and packaged_layout and sys.platform.startswith("win"))
+        action_text = "是否立即下載並自動更新？" if can_install else "此版本需要使用完整安裝包更新，是否前往下載頁？"
+        should_update = messagebox.askyesno(
             "發現新版本",
             f"SanWich {latest} 已經發佈。\n\n"
             f"目前版本：v{APP_VERSION}\n\n"
             "更新不會重設授權時間，也不會覆寫 API 設定或個人化規則庫。\n"
-            "是否前往 GitHub 下載新版？",
+            f"{action_text}",
             parent=self,
         )
-        if should_open:
+        if not should_update:
+            return
+        if can_install:
+            self.install_update_async(asset, latest)
+        else:
             webbrowser.open_new_tab(url)
+
+    def install_update_async(self, asset: dict, latest: str):
+        self.status_text.set(f"正在下載 SanWich {latest} 更新…")
+        self.log(f"開始下載更新 {asset['name']}。", "model")
+
+        def progress(received: int, total: int):
+            percent = min(100, int(received * 100 / max(total, 1)))
+            self.after(0, lambda: self.status_text.set(f"正在下載更新… {percent}%"))
+
+        def worker():
+            try:
+                package = UPDATER.download_verified_asset(asset, progress=progress)
+                helper = here() / "update_helper.ps1"
+                relaunch = here() / "run_hidden.vbs"
+                if not relaunch.exists():
+                    relaunch = here() / "run_app.bat"
+                UPDATER.launch_installer(
+                    package,
+                    helper_path=helper,
+                    install_root=here().parent,
+                    relaunch_path=relaunch,
+                    result_path=local_data_dir() / "update_result.json",
+                )
+                self.after(0, self._close_for_update)
+            except Exception as error:
+                detail = str(error)
+                self.after(0, lambda detail=detail: self._show_update_error(detail))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _close_for_update(self):
+        self.status_text.set("更新已下載，正在重新啟動…")
+        self.log("更新檔驗證通過，SanWich 將關閉並套用更新。", "success")
+        self.after(250, self.destroy)
+
+    def _show_update_error(self, _detail: str):
+        self.status_text.set("更新失敗；目前版本未變更")
+        self.log("更新下載或驗證失敗，未變更現有程式。", "error")
+        messagebox.showerror("更新失敗", "無法安全完成更新，現有版本未被修改。\n\n請稍後重試，或使用完整安裝包。", parent=self)
+
+    def refresh_license_if_due_async(self, *, force: bool = False, callback=None):
+        if LICENSE_MANAGER is None or getattr(LICENSE_MANAGER, "server_service", None) is None:
+            if force:
+                messagebox.showerror("無法驗證", "線上授權服務尚未設定完成。", parent=self)
+            return
+        service = LICENSE_MANAGER.server_service
+        if not service.has_cached_license():
+            if force:
+                messagebox.showinfo("尚未啟用", "這台電腦目前沒有需要重新驗證的完整版授權。", parent=self)
+            return
+        try:
+            due = service.offline_state().get("mode") == "grace"
+        except Exception:
+            due = True
+        if not force and not due:
+            return
+
+        def worker():
+            ok = LICENSE_MANAGER.refresh_server_license()
+            self.after(0, lambda: self._finish_license_refresh(ok, force, callback))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_license_refresh(self, ok: bool, show_message: bool, callback=None):
+        if callback:
+            callback()
+        if ok:
+            self.log("完整版授權已完成線上驗證。", "success")
+            if show_message:
+                messagebox.showinfo("驗證完成", "完整版授權已更新，可以繼續離線使用。", parent=self)
+        else:
+            self.log("目前無法完成完整版線上驗證；基本功能不受影響。", "warn")
+            if show_message:
+                messagebox.showerror("驗證失敗", "目前無法完成線上驗證，請確認網路後再試。\n\n基本功能不受影響。", parent=self)
 
     def build(self):
         self.grid_columnconfigure(0, weight=1)
@@ -2749,22 +2877,27 @@ class App(ctk.CTk):
         self.persist_basic_config()
 
     def show_supporter_message(self, feature_name: str):
-        """Supporter 功能提示：說明 Free 仍可完成核心工作，提供支持連結。"""
+        """完整版功能提示：基本功能仍可用，提供啟用或購買說明。"""
         label = SUPPORTER_FEATURE_LABELS.get(feature_name, feature_name)
         status = license_status_summary()
         if status["mode"] == "trial":
             status_line = (
-                f"你正在使用 Supporter Trial，到期日：{status['trial_ends_at']}。\n"
-                "試用結束後，SanWich 會回到 Free 模式，核心功能仍可繼續使用。"
+                f"你正在使用完整版試用，到期日：{status['trial_ends_at']}。\n"
+                "試用結束後，SanWich 會回到基本功能，核心工作仍可繼續。"
+            )
+        elif status["mode"] == "grace":
+            status_line = (
+                "完整版需要重新驗證，但目前仍在離線寬限期內。\n"
+                "請連線一次完成驗證；基本功能不受影響。"
             )
         else:
             status_line = (
-                "你的 Supporter Trial 已結束。SanWich Free 仍可繼續使用。\n"
-                "如果 SanWich 幫你省下時間，歡迎用 NT$99 起支持開發。"
+                "目前是基本功能模式；SanWich 的核心單檔工作仍可繼續。\n"
+                "如果 SanWich 幫你省下時間，歡迎購買完整版支持開發。"
             )
 
         win = ctk.CTkToplevel(self)
-        win.title(f"{label}｜Supporter 功能")
+        win.title(f"{label}｜完整版功能")
         win.geometry("520x360")
         win.configure(fg_color=BG)
         self.apply_window_icon(win, "_setting.png")
@@ -2779,10 +2912,10 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             box,
             text=(
-                f"{label}是 Supporter 功能。\n"
-                "SanWich Free 仍可完成單檔字幕工作（辨識、校對、輸出、編輯）。\n\n"
+                f"{label}是完整版功能。\n"
+                "SanWich 基本功能仍可完成單檔字幕工作（辨識、校對、輸出、編輯）。\n\n"
                 f"{status_line}\n\n"
-                "支持開發可解鎖批次處理、快速對照完整版、個人化規則庫與語者分離。"
+                "啟用完整版可解鎖批次處理、快速對照、個人化規則庫與語者分離。"
             ),
             text_color=MUTED_ON_DARK,
             font=(FONT, 14),
@@ -3155,7 +3288,7 @@ class App(ctk.CTk):
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(12, 2))
         ctk.CTkLabel(
             supporter,
-            text="SanWich Free 永久可用。Supporter 解鎖批次處理、快速對照完整版、個人化規則庫與語者分離。",
+            text="SanWich 基本功能永久可用。完整版可解鎖批次處理、快速對照、個人化規則庫與語者分離。",
             text_color=MUTED_ON_DARK,
             font=(FONT, 12),
             anchor="w",
@@ -3167,7 +3300,7 @@ class App(ctk.CTk):
         sup_key_entry = ctk.CTkEntry(
             supporter,
             textvariable=sup_key_var,
-            placeholder_text="貼上 Supporter Key",
+            placeholder_text="貼上完整版 Key",
             height=38,
             corner_radius=14,
             fg_color="#222020",
@@ -3178,15 +3311,83 @@ class App(ctk.CTk):
 
         def apply_supporter_key():
             if LICENSE_MANAGER is None:
-                messagebox.showerror("無法啟用", "授權模組載入失敗，請確認 core/license_manager.py 存在。", parent=win)
+                messagebox.showerror("無法啟用", "授權模組載入失敗，請確認安裝檔案完整。", parent=win)
                 return
             if LICENSE_MANAGER.activate_key(sup_key_var.get()):
                 lic_status_var.set(f"版本狀態：{license_status_summary()['label']}")
                 sup_key_var.set("")
-                self.log("Supporter Key 已啟用，感謝支持 SanWich！", "success")
-                messagebox.showinfo("啟用成功", "Supporter 功能已解鎖，感謝你的支持！", parent=win)
+                self.log("完整版 Key 已啟用，感謝支持 SanWich！", "success")
+                messagebox.showinfo("啟用成功", "完整版功能已解鎖，感謝你的支持！", parent=win)
             else:
-                messagebox.showerror("Key 無效", "請確認 Supporter Key 是否輸入正確。", parent=win)
+                error_code = getattr(LICENSE_MANAGER, "last_license_error_code", "")
+                if error_code == "DEVICE_LIMIT_REACHED":
+                    messagebox.showerror("裝置數量已滿", "這組 Key 已啟用兩台裝置。請先在其中一台停用授權，再重新啟用。", parent=win)
+                elif error_code in {"LICENSE_REVOKED", "LICENSE_DISABLED", "LICENSE_EXPIRED"}:
+                    messagebox.showerror("授權無法使用", "這組完整版 Key 已停用、撤銷或到期。", parent=win)
+                elif error_code in {"LICENSE_NOT_FOUND", "INVALID_REQUEST"}:
+                    messagebox.showerror("Key 無效", "請確認完整版 Key 是否輸入正確。", parent=win)
+                elif getattr(LICENSE_MANAGER, "last_license_error", ""):
+                    messagebox.showerror("無法完成啟用", "目前無法完成線上授權。請確認網路後再試。", parent=win)
+                else:
+                    messagebox.showerror("Key 無效", "請確認完整版 Key 是否輸入正確。", parent=win)
+
+        def migrate_legacy_key():
+            if LICENSE_MANAGER is None:
+                return
+            legacy_key = sup_key_var.get().strip()
+            if not legacy_key:
+                messagebox.showerror("缺少 Key", "請先貼上舊版 SW2 Key。", parent=win)
+                return
+            if not messagebox.askyesno(
+                "確認遷移舊版授權",
+                "這會將舊版 Key 傳送至 WiKiVibe License Server 驗證，並建立新版裝置授權。是否繼續？",
+                parent=win,
+            ):
+                return
+            result = LICENSE_MANAGER.migrate_legacy_key(legacy_key)
+            if not result:
+                messagebox.showerror("無法遷移", "舊版 Key 未通過遷移，或目前無法連線授權伺服器。", parent=win)
+                return
+            replacement_key = result.get("replacement_key") if isinstance(result, dict) else None
+            sup_key_var.set("")
+            lic_status_var.set(f"版本狀態：{license_status_summary()['label']}")
+            self.log("舊版授權已完成新版遷移。", "success")
+            if replacement_key:
+                messagebox.showinfo(
+                    "遷移成功：請立即保存新 Key",
+                    f"新版完整版 Key（只顯示這一次）：\n\n{replacement_key}\n\n請妥善保存。",
+                    parent=win,
+                )
+            else:
+                messagebox.showinfo("遷移成功", "舊版授權已完成新版遷移。", parent=win)
+
+        def refresh_license_status():
+            lic_status_var.set(f"版本狀態：{license_status_summary()['label']}")
+
+        def verify_online_license():
+            self.refresh_license_if_due_async(force=True, callback=refresh_license_status)
+
+        def deactivate_this_device():
+            if LICENSE_MANAGER is None or not messagebox.askyesno(
+                "停用這台電腦",
+                "停用成功後會釋放一個裝置名額；這台電腦將回到試用或基本功能。是否繼續？",
+                parent=win,
+            ):
+                return
+
+            def worker():
+                ok = LICENSE_MANAGER.deactivate_server_license()
+                self.after(0, lambda: finish_deactivate(ok))
+
+            def finish_deactivate(ok: bool):
+                refresh_license_status()
+                if ok:
+                    self.log("這台電腦的完整版授權已停用。", "success")
+                    messagebox.showinfo("已停用", "裝置名額已釋放；API Key 與個人設定不受影響。", parent=win)
+                else:
+                    messagebox.showerror("停用失敗", "目前無法連線授權伺服器，因此沒有清除本機授權。請稍後再試。", parent=win)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         ctk.CTkButton(
             supporter,
@@ -3199,16 +3400,64 @@ class App(ctk.CTk):
             font=(FONT, 13, "bold"),
             command=apply_supporter_key,
         ).grid(row=2, column=1, sticky="e", padx=(0, 16), pady=(0, 12))
+        ctk.CTkButton(
+            supporter,
+            text="遷移舊版 SW2 Key",
+            width=150,
+            height=30,
+            corner_radius=12,
+            fg_color="#32333B",
+            hover_color="#45464F",
+            font=(FONT, 12),
+            command=migrate_legacy_key,
+        ).grid(row=3, column=1, sticky="e", padx=(0, 16), pady=(0, 12))
+        license_actions = ctk.CTkFrame(supporter, fg_color="transparent")
+        license_actions.grid(row=3, column=0, sticky="w", padx=16, pady=(0, 12))
+        ctk.CTkButton(
+            license_actions,
+            text="重新驗證",
+            width=92,
+            height=30,
+            corner_radius=12,
+            fg_color="#32333B",
+            hover_color="#45464F",
+            font=(FONT, 12),
+            command=verify_online_license,
+        ).pack(side="left")
+        ctk.CTkButton(
+            license_actions,
+            text="停用此裝置",
+            width=104,
+            height=30,
+            corner_radius=12,
+            fg_color="#32333B",
+            hover_color="#45464F",
+            font=(FONT, 12),
+            command=deactivate_this_device,
+        ).pack(side="left", padx=(8, 0))
 
         credits = ctk.CTkFrame(outer, fg_color="transparent")
         credits.grid(row=12, column=0, sticky="ew", padx=24, pady=(0, 18))
         credits.grid_columnconfigure(0, weight=1)
+        version_area = ctk.CTkFrame(credits, fg_color="transparent")
+        version_area.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
-            credits,
+            version_area,
             text=f"v{APP_VERSION}",
             text_color=TEXT_ON_DARK,
             font=(EN_FONT, 12, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+        ).pack(side="left")
+        ctk.CTkButton(
+            version_area,
+            text="檢查更新",
+            width=76,
+            height=26,
+            corner_radius=10,
+            fg_color="#32333B",
+            hover_color="#45464F",
+            font=(FONT, 11),
+            command=lambda: self.check_for_updates_async(True),
+        ).pack(side="left", padx=(10, 0))
         brand = ctk.CTkFrame(credits, fg_color="transparent")
         brand.grid(row=0, column=1, sticky="e")
         WikiVibeLink(
@@ -3662,8 +3911,9 @@ class App(ctk.CTk):
                             # 本機 7B 語意斷句常失敗且極耗時（又是一整輪生成）；改走本機安全斷句。
                             skip_ai_semantic = provider == "local"
                             if skip_ai_semantic:
+                                semantic_segmented = True
                                 self.log(
-                                    "本機 AI：略過 AI 語意斷句（省時、避免二次漏改字），改用本機安全斷句。",
+                                    "本機 AI：略過二次語意斷句；保留校正版文字目前的固定 TC 分配。",
                                     "model",
                                 )
                             else:
@@ -3681,32 +3931,42 @@ class App(ctk.CTk):
                                         target_width=self.srt_max_line_width(),
                                         progress_cb=segmentation_progress,
                                     )
-                                    if semantic_meta.get("complete") and semantic_chunks:
+                                    if semantic_meta.get("usable") and semantic_chunks:
                                         chunks = semantic_chunks
                                         semantic_segmented = True
-                                        self.log(
-                                            f"AI 語意斷句完成：由 {semantic_meta.get('input_count', '?')} 組"
-                                            f"重切為 {len(semantic_chunks)} 組（只改切點，文字未改）。",
-                                            "success",
-                                        )
+                                        failed_windows = semantic_meta.get("failed_windows") or []
+                                        if failed_windows:
+                                            self.log(
+                                                f"AI 固定 TC 斷句局部完成：共 {len(semantic_chunks)} 組，"
+                                                f"TC 完全不變；失敗窗口 {failed_windows} 保留原校正版分配。",
+                                                "warn",
+                                            )
+                                        else:
+                                            self.log(
+                                                f"AI 固定 TC 斷句完成：共 {len(semantic_chunks)} 組，"
+                                                "TC 起訖與順序完全不變。",
+                                                "success",
+                                            )
                                     else:
                                         fails = semantic_meta.get("failed_windows") or []
+                                        chunks = after_chunks
+                                        semantic_segmented = True
                                         self.log(
-                                            "AI 語意斷句未通過驗證，整份回退本機安全斷句"
-                                            "（不混用兩種切句風格）。"
-                                            "說明：AI 本來就可以重切不好的斷句；被拒通常是"
-                                            "它順便改了字、或 JSON 格式／截斷問題，"
-                                            f"不是時間碼被鎖死。失敗窗口：{fails or '—'}；"
+                                            "AI 固定 TC 斷句沒有可用結果，保留原校正版字幕與 TC。"
+                                            f"失敗窗口：{fails or '—'}；"
                                             f"完整性重試 {semantic_meta.get('integrity_retry_count', 0)} 次。",
                                             "warn",
                                         )
                                 except Exception as segmentation_exc:
+                                    chunks = after_chunks
+                                    semantic_segmented = True
                                     self.log(
-                                        f"AI 語意斷句失敗，整份回退本機安全斷句：{segmentation_exc}",
+                                        f"AI 固定 TC 斷句失敗，保留原校正版字幕與 TC：{segmentation_exc}",
                                         "warn",
                                     )
                         else:
                             ai_incomplete = True
+                            semantic_segmented = True
                             missing_count = max(0, len(before_chunks) - covered_count)
                             self.set_chip(self.ai_chip, "error")
                             self.log(
@@ -3716,6 +3976,7 @@ class App(ctk.CTk):
                             )
                 except Exception as exc:
                     ai_incomplete = True
+                    semantic_segmented = True
                     self.log(f"AI 校對失敗：{exc}，改儲存原始辨識結果。", "error")
                     self.set_chip(self.ai_chip, "error")
                     chunks = before_chunks

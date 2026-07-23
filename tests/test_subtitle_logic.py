@@ -270,25 +270,23 @@ class SubtitleLogicTests(unittest.TestCase):
         self.assertEqual(CORE.LAST_LLM_MERGE_META["total_batches"], 3)
         self.assertLessEqual(max(groups_per_request), CORE.LLM_BATCH_MAX_GROUPS)
 
-    def test_semantic_resegmentation_can_move_boundaries_without_changing_text(self):
+    def test_semantic_resegmentation_redistributes_corrected_master_over_fixed_timecodes(self):
         chunks = [
-            {"timestamp": (1.12, 2.475), "text": "我請Siri AI幫我"},
-            {"timestamp": (2.475, 3.92), "text": "做了一張生日賀卡"},
-            {"timestamp": (3.92, 7.817), "text": "它居然就直接給我這個這個是逼著我送iPhone"},
-            {"timestamp": (7.817, 9.56), "text": "當生日禮物還是怎樣"},
-            {"timestamp": (9.56, 10.434), "text": "它還跟我說它"},
-            {"timestamp": (10.434, 11.6), "text": "保留了原本的設計"},
+            {"timestamp": (1.12, 2.475), "text": "這一次的教育"},
+            {"timestamp": (2.475, 3.92), "text": "改革是希望讓"},
+            {"timestamp": (3.92, 5.817), "text": "大家都可以看到"},
         ]
         expected = [
-            "我請Siri AI",
-            "幫我做了一張生日賀卡",
-            "它居然就直接給我這個",
-            "這個是逼著我送iPhone",
-            "當生日禮物還是怎樣",
-            "它還跟我說",
-            "它保留了原本的設計",
+            "這一次的教育改革",
+            "是希望讓大家",
+            "都可以看到",
         ]
-        response = __import__("json").dumps({"segments": expected}, ensure_ascii=False)
+        response = __import__("json").dumps({
+            "assignments": [
+                {"id": f"TC{i + 1:04d}", "text": text}
+                for i, text in enumerate(expected)
+            ]
+        }, ensure_ascii=False)
         original_call = CORE._llm_call_once
         captured_messages = []
         try:
@@ -308,25 +306,75 @@ class SubtitleLogicTests(unittest.TestCase):
             CORE._llm_call_once = original_call
 
         self.assertTrue(meta["complete"])
+        self.assertTrue(meta["usable"])
         self.assertTrue(meta["text_preserved"])
+        self.assertTrue(meta["fixed_timecodes"])
         self.assertEqual(len(captured_messages), 1)
-        self.assertNotIn("前文，只供理解", captured_messages[0])
-        self.assertNotIn("後文，只供理解", captured_messages[0])
+        self.assertIn("這一次的教育改革｜是希望讓大家｜都可以看到", CORE.SEMANTIC_SEGMENTATION_PROMPT)
+        self.assertIn("這一次｜的教育改革是希望｜讓大家都可以看到", CORE.SEMANTIC_SEGMENTATION_PROMPT)
         self.assertEqual([row["text"] for row in result], expected)
         original_text = "".join(CORE.strip_punct_for_srt(row["text"]).replace(" ", "") for row in chunks)
         result_text = "".join(row["text"].replace(" ", "") for row in result)
         self.assertEqual(result_text, original_text)
         self.assertAlmostEqual(result[0]["timestamp"][0], 1.12, places=3)
-        self.assertAlmostEqual(result[-1]["timestamp"][1], 11.6, places=3)
-        self.assertTrue(all(a["timestamp"][1] <= b["timestamp"][0] + 0.001
-                            for a, b in zip(result, result[1:])))
+        self.assertEqual(
+            [row["timestamp"] for row in result],
+            [row["timestamp"] for row in chunks],
+        )
 
-    def test_semantic_resegmentation_rejects_any_text_change(self):
+    def test_semantic_resegmentation_uses_five_group_readonly_context(self):
+        chunks = [
+            {"timestamp": (float(i), float(i + 1)), "text": f"第{i + 1}組文字"}
+            for i in range(12)
+        ]
+        original_call = CORE._llm_call_once
+        captured_messages = []
+
+        def echo_fixed_groups(_system, user_msg, _cfg):
+            captured_messages.append(user_msg)
+            ids_text = user_msg.split("【本次寫入槽位】\n", 1)[1].split("\n", 1)[0]
+            expected_ids = [item.strip() for item in ids_text.split(",")]
+            master = user_msg.split("【本次校正版母稿】\n", 1)[1].split("\n【驗證】", 1)[0]
+            original_rows = {
+                f"TC{i + 1:04d}": CORE.strip_punct_for_srt(chunks[i]["text"])
+                for i in range(len(chunks))
+            }
+            assignments = [
+                {"id": tc_id, "text": original_rows[tc_id]}
+                for tc_id in expected_ids
+            ]
+            self.assertEqual("".join(row["text"] for row in assignments), master)
+            return __import__("json").dumps({"assignments": assignments}, ensure_ascii=False)
+
+        try:
+            CORE._llm_call_once = echo_fixed_groups
+            result, meta = CORE.semantic_resegment_chunks(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [],
+                },
+                lambda *_args: None,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+
+        self.assertEqual(len(captured_messages), 3)
+        self.assertIn("【寫入】 TC0001", captured_messages[0])
+        self.assertIn("【參考】 TC0006", captured_messages[0])
+        self.assertNotIn("TC0011", captured_messages[0])
+        self.assertIn("【參考】 TC0005", captured_messages[1])
+        self.assertIn("【寫入】 TC0006", captured_messages[1])
+        self.assertIn("【參考】 TC0011", captured_messages[1])
+        self.assertTrue(meta["complete"])
+        self.assertEqual([row["timestamp"] for row in result], [row["timestamp"] for row in chunks])
+
+    def test_semantic_resegmentation_rejects_text_change_but_keeps_fixed_tc_window(self):
         chunks = [{"timestamp": (0.0, 2.0), "text": "我做了一張生日賀卡"}]
         original_call = CORE._llm_call_once
         try:
             CORE._llm_call_once = lambda *_args, **_kwargs: (
-                '{"segments":["我做了一張生日卡片"]}'
+                '{"assignments":[{"id":"TC0001","text":"我做了一張生日卡片"}]}'
             )
             result, meta = CORE.semantic_resegment_chunks(
                 chunks,
@@ -339,15 +387,56 @@ class SubtitleLogicTests(unittest.TestCase):
         finally:
             CORE._llm_call_once = original_call
 
-        self.assertEqual(result, [])
+        self.assertEqual(result, chunks)
         self.assertFalse(meta["complete"])
+        self.assertTrue(meta["usable"])
+        self.assertEqual(meta["failed_windows"], [1])
         self.assertEqual(meta["integrity_failures"], 1)
+
+    def test_semantic_resegmentation_keeps_only_failed_window_original(self):
+        chunks = [
+            {"timestamp": (float(i), float(i + 1)), "text": f"第{i + 1}組"}
+            for i in range(6)
+        ]
+        responses = iter([
+            __import__("json").dumps({
+                "assignments": [
+                    {"id": "TC0001", "text": "第1組第2組"},
+                    {"id": "TC0002", "text": "第3組"},
+                    {"id": "TC0003", "text": "第4組"},
+                    {"id": "TC0004", "text": "第5"},
+                    {"id": "TC0005", "text": "組"},
+                ]
+            }, ensure_ascii=False),
+            '{"assignments":[{"id":"TC0006","text":"錯誤文字"}]}',
+        ])
+        original_call = CORE._llm_call_once
+        try:
+            CORE._llm_call_once = lambda *_args, **_kwargs: next(responses)
+            result, meta = CORE.semantic_resegment_chunks(
+                chunks,
+                {
+                    "api_provider": "openai", "api_key": "test", "model": "test",
+                    "_llm_retry_delays": [], "_semantic_integrity_retries": 0,
+                },
+                lambda *_args: None,
+            )
+        finally:
+            CORE._llm_call_once = original_call
+
+        self.assertFalse(meta["complete"])
+        self.assertTrue(meta["partial"])
+        self.assertEqual(meta["applied_windows"], [1])
+        self.assertEqual(meta["failed_windows"], [2])
+        self.assertEqual(result[0]["text"], "第1組第2組")
+        self.assertEqual(result[5]["text"], "第6組")
+        self.assertEqual([row["timestamp"] for row in result], [row["timestamp"] for row in chunks])
 
     def test_semantic_resegmentation_retries_integrity_violation(self):
         chunks = [{"timestamp": (0.0, 2.0), "text": "每個題結束之後我會給一個排名"}]
         responses = iter([
-            '{"segments":["每題結束之後","我會給一個排名"]}',
-            '{"segments":["每個題結束之後","我會給一個排名"]}',
+            '{"assignments":[{"id":"TC0001","text":"每題結束之後我會給一個排名"}]}',
+            '{"assignments":[{"id":"TC0001","text":"每個題結束之後我會給一個排名"}]}',
         ])
         original_call = CORE._llm_call_once
         try:
@@ -366,7 +455,7 @@ class SubtitleLogicTests(unittest.TestCase):
         self.assertTrue(meta["complete"])
         self.assertEqual(meta["integrity_failures"], 1)
         self.assertEqual(meta["integrity_retry_count"], 1)
-        self.assertEqual([row["text"] for row in result], ["每個題結束之後", "我會給一個排名"])
+        self.assertEqual([row["text"] for row in result], ["每個題結束之後我會給一個排名"])
 
 
 if __name__ == "__main__":

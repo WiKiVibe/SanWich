@@ -27,6 +27,8 @@ datas = [
     ('core/SanWich_legacy_core.py', 'core'),
     ('core/features.py', 'core'),
     ('core/license_manager.py', 'core'),
+    ('core/license_service.py', 'core'),
+    ('core/updater.py', 'core'),
     ('core/personal_rules.py', 'core'),
     ('core/learning.py', 'core'),
     ('core/prompt_templates.py', 'core'),
@@ -35,6 +37,7 @@ datas = [
     # 安全：絕不打包含真實 API Key 的 config.json；缺檔時程式會用預設值自動重建
     ('config.example.json', '.'),
     ('docs/申請API_Key教學.md', 'docs'),
+    ('scripts/update/apply_update.ps1', '.'),
 ]
 
 # 只保留真的存在的檔案，避免打包失敗

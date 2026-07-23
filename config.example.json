@@ -15,5 +15,9 @@
   "use_domain_prompt": true,
   "prompt_template_domain": "通用",
   "use_custom_dictionary": true,
-  "use_project_context": true
+  "use_project_context": true,
+  "license_product_id": "sanwich",
+  "license_api_base_url": "https://wikivibe-license-server.wikivibe.workers.dev",
+  "license_issuer": "https://wikivibe-license-server.wikivibe.workers.dev",
+  "license_public_key_spki": "MCowBQYDK2VwAyEAkSWQwsY0BGQ5CUYgTuY8cy3VyF1L5a-_3o4mRnVb9rU"
 }

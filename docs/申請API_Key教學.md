@@ -1,6 +1,6 @@
 # SanWich — API Key 申請教學
 
-## v2.5b：本機私密 AI 不需要 API Key
+## v2.5：本機私密 AI 不需要 API Key
 
 - 在「設定」選擇 **本機私密 AI**。
 - 按「下載／檢查本地 AI」，或直接開始第一次 AI 校對。

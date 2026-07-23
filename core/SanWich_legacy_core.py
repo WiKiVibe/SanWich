@@ -129,33 +129,25 @@ SUPPLEMENT_GLOSSARY_RULES = (
 )
 
 SEMANTIC_SEGMENTATION_PROMPT = (
-    "你是台灣影片剪輯師的口播字幕斷句器。你不是在分析書面文法，而是在找觀眾一眼能讀完的口語意群與說話拍點。\n"
-    "【可以做／不可以做】\n"
-    "• 可以、也應該：大幅改「切在哪裡」。原本斷句不好時，請重新規劃 segments，不要沿用輸入原本的字幕分段。\n"
-    "• 不可以：增刪、替換任何字，改字序，或順手校正錯字／專名／空格／標點。你不是校對器。\n"
-    "• 時間軸由本機依「未改動的字元流」重算；你一改字，時間就對不齊，結果會被整段拒絕。\n"
-    "先通讀整段、比較所有可能切點，再選擇整體最自然的組合。\n"
-    "每個切點的左右兩側，都應該能各自成為自然、可獨立呈現的口語拍點。若前段只是下一段的主詞、受詞、名詞片語或必要條件，請改找附近更自然的切點。\n"
-    "注意時間狀語、話題、主詞、謂語、引述、轉折、重複起頭與新動作的口語拍點。不要只追求書面文法完整，也不要為了句子短而拆散同一個意群。\n"
-    "一個意群過長時，可在內部轉折、重複起頭、新動作或新主詞之前切開。常態約 10 至 22 個中文字寬，優先落在 12 至 18 字寬；語意完整的一句即使稍長也不要硬拆。七字寬以下的短段只有在能獨立形成明確轉折、問答或強調拍點時才保留，否則應與相鄰意群合併。當多種切法都自然時，選擇切點較少的組合。\n"
-    "輸入即使有錯字、口誤、贅詞或不自然的英數格式，也必須逐字原樣保留；字的問題應在上一階段校對完成，這一輪只動切點。\n"
-    "只回傳 JSON，格式必須是：{\"segments\":[\"...\",\"...\"]}\n"
-    "segments 逐項依序串接後，去掉空白必須與輸入全文完全相同；你只是在同一串字上插入分段。\n\n"
-    "【剪輯風格範例一】\n"
-    "輸入：我請Siri AI幫我做了一張生日賀卡它居然就直接給我這個這個是逼著我送iPhone當生日禮物還是怎樣它還跟我說它保留了原本的設計\n"
-    "輸出：{\"segments\":[\"我請Siri AI\",\"幫我做了一張生日賀卡\",\"它居然就直接給我這個\",\"這個是逼著我送iPhone\",\"當生日禮物還是怎樣\",\"它還跟我說\",\"它保留了原本的設計\"]}\n\n"
-    "【剪輯風格範例二】\n"
-    "輸入：每個題結束之後我會給一個排名最後算一個平均分\n"
-    "輸出：{\"segments\":[\"每個題結束之後\",\"我會給一個排名\",\"最後算一個平均分\"]}\n\n"
-    "【剪輯風格範例三】\n"
-    "輸入：很多人原本在等這個返校季的優惠打算等這個BTS開跑來入手一台MacBook買得稍微划算一點結果等到的卻是這個全線的漲價更誇張的就是這個教育商店的價格也都跟著水漲船高了我相信很多人心裡肯定是很不爽的\n"
-    "輸出：{\"segments\":[\"很多人原本在等這個返校季的優惠\",\"打算等這個BTS開跑\",\"來入手一台MacBook\",\"買得稍微划算一點\",\"結果等到的卻是這個全線的漲價\",\"更誇張的就是\",\"這個教育商店的價格也都跟著水漲船高了\",\"我相信很多人心裡肯定是很不爽的\"]}\n\n"
-    "【剪輯風格範例四】\n"
-    "輸入：Apple未來這兩年的產品線更新的時程幾乎都已經攤開在桌面上了目前根據分析師的預測這個記憶體的價格可能會等到2027年才會達到一個最高峰之後才會開始出現緩解\n"
-    "輸出：{\"segments\":[\"Apple未來這兩年的產品線更新的時程\",\"幾乎都已經攤開在桌面上了\",\"目前根據分析師的預測\",\"這個記憶體的價格可能會等到2027年\",\"才會達到一個最高峰\",\"之後才會開始出現緩解\"]}\n\n"
-    "【剪輯風格範例五】\n"
-    "輸入：漲價已經變成事實了沒辦法逆轉了在看每一台之前我就先回答一個問題\n"
-    "輸出：{\"segments\":[\"漲價已經變成事實了沒辦法逆轉了\",\"在看每一台之前我就先回答一個問題\"]}"
+    "你是台灣影片剪輯師的口播字幕斷句器。校字與腳本對齊已在上一階段完成；"
+    "你現在要把『校正版母稿』重新分配到指定的固定 TC 槽位。\n"
+    "【權限與底線】\n"
+    "• 你可以自由跨原始字幕組搬動文字，讓每一組的字數與原本不同。\n"
+    "• assignments 的數量、id 與順序必須完全等於『本次寫入槽位』；不得新增、刪除或改寫 id。\n"
+    "• 不要輸出時間碼。TC 起訖與順序由本機鎖定，你只決定各槽位要顯示哪些母稿文字。\n"
+    "• 前後文是唯讀參考，不能把前後文的文字搬進本次母稿，也不能把本次母稿搬出去。\n"
+    "• assignments 的 text 依序串接並去掉空白後，必須與『本次校正版母稿』完全相同。"
+    "不要再次校字、改專名、增刪內容或改變字序。\n"
+    "【斷句判斷】\n"
+    "先通讀前後文，再以觀眾一眼能讀完的口語意群與說話拍點分配文字；語意完整優先於平均字數。\n"
+    "不要拆散修飾語與中心詞、介詞與受詞、姓名與稱謂、數字與單位、完整英文詞組。"
+    "不要留下資訊不足的孤立起頭，也不要讓下一組從承接前文的『的／地／得』開始。\n"
+    "『這一次的教育改革｜是希望讓大家｜都可以看到』是自然切法；"
+    "『這一次｜的教育改革是希望｜讓大家都可以看到』是不自然切法，禁止模仿。\n"
+    "常態約 10 至 22 個中文字寬，優先 12 至 18；完整意群稍長可以保留。"
+    "七字寬以下只有在能獨立形成轉折、問答或強調拍點時才成立。\n"
+    "只回傳 JSON：{\"assignments\":[{\"id\":\"TC0001\",\"text\":\"...\"}]}。"
+    "不要加入解釋、Markdown 或其他欄位。"
 )
 
 # ── 設定檔路徑 ────────────────────────────────────────────
@@ -1158,7 +1150,9 @@ LLM_RETRY_DELAYS = (5.0, 15.0, 30.0)
 LLM_PARTIAL_RETRY_DEPTH = 3
 LAST_LLM_MERGE_META: dict = {}
 LAST_SEMANTIC_SEGMENTATION_META: dict = {}
-SEMANTIC_SEGMENTATION_WINDOW_CHARS = 450
+SEMANTIC_SEGMENTATION_WINDOW_CHARS = 450  # 舊設定相容；固定 TC 模式改以組數切窗
+SEMANTIC_WRITE_GROUPS = 5
+SEMANTIC_CONTEXT_GROUPS = 5
 
 
 def _llm_call_once(system: str, user_msg: str, cfg: dict) -> str:
@@ -2071,30 +2065,30 @@ def _semantic_window_text_map(window_chunks: list[dict]) -> tuple[str, list[floa
 
 
 def _semantic_failure_label(exc: BaseException) -> str:
-    """把驗證例外翻成使用者可懂的短標籤（斷句可改切點；失敗多半是改字或格式）。"""
+    """把固定 TC 分配的驗證例外翻成使用者可懂的短標籤。"""
     text = str(exc or "")
-    if "找不到 JSON" in text or ("JSON" in text and "segments" in text):
-        return "格式問題（JSON／segments）"
+    if "找不到 JSON" in text or ("JSON" in text and "assignments" in text):
+        return "格式問題（JSON／assignments）"
     if "JSON" in text or isinstance(exc, json.JSONDecodeError):
         return "格式問題（JSON 無效或被截斷）"
-    if "空白字幕段" in text:
+    if "空白" in text:
         return "格式問題（出現空白段）"
-    if "增刪、改字或字序" in text or "字數原文" in text:
-        return "文字被改動（應只改切點）"
+    if "id" in text or "數量" in text or "順序" in text:
+        return "固定 TC 槽位不一致"
+    if "增刪、改字或字序" in text or "字數母稿" in text:
+        return "母稿文字被改動"
     if "無法映射" in text or "未覆蓋" in text:
-        return "切點無法對回原文"
-    if "映射後出現空白" in text:
-        return "切點落在空白處"
+        return "分配無法對回母稿"
     return "驗證未通過"
 
 
 def _semantic_text_mismatch_detail(source_text: str, joined_canonical: str) -> str:
-    """簡短說明模型字串與原文差在哪（方便 log，不傾印全文）。"""
+    """簡短說明模型字串與校正版母稿差在哪（方便 log，不傾印全文）。"""
     source = re.sub(r"\s+", "", source_text or "")
     joined = joined_canonical or ""
     if source == joined:
         return "字串比對異常"
-    parts = [f"字數原文{len(source)}／模型{len(joined)}"]
+    parts = [f"字數母稿{len(source)}／模型{len(joined)}"]
     limit = min(len(source), len(joined))
     diff_at = next((i for i in range(limit) if source[i] != joined[i]), None)
     if diff_at is None:
@@ -2107,11 +2101,9 @@ def _semantic_text_mismatch_detail(source_text: str, joined_canonical: str) -> s
     return "；".join(parts)
 
 
-def _parse_semantic_segments(raw_response: str, source_text: str) -> tuple[list[str], list[int]]:
-    """解析模型切點；文字不是逐字相同就拒絕，輸出內容永遠取自 source。
-
-    允許、也預期模型重切（改 segments 邊界）；禁止改字元內容。
-    """
+def _parse_semantic_assignments(raw_response: str, source_text: str,
+                                expected_ids: list[str]) -> list[str]:
+    """解析固定 TC 文字分配；只採用分配長度，真正文字永遠取自母稿。"""
     raw = (raw_response or "").strip()
     match = re.search(r"\{.*\}", raw, flags=re.S)
     if not match:
@@ -2120,14 +2112,26 @@ def _parse_semantic_segments(raw_response: str, source_text: str) -> tuple[list[
         payload = json.loads(match.group(0))
     except json.JSONDecodeError as exc:
         raise ValueError(f"JSON 無效或被截斷：{exc}") from exc
-    proposed = payload.get("segments") if isinstance(payload, dict) else None
-    if not isinstance(proposed, list) or not proposed or not all(isinstance(item, str) for item in proposed):
-        raise ValueError("JSON 缺少有效的 segments 陣列。")
+    proposed = payload.get("assignments") if isinstance(payload, dict) else None
+    if not isinstance(proposed, list) or not all(isinstance(item, dict) for item in proposed):
+        raise ValueError("JSON 缺少有效的 assignments 陣列。")
+    if len(proposed) != len(expected_ids):
+        raise ValueError(
+            f"assignments 數量不一致：固定 TC {len(expected_ids)}／模型 {len(proposed)}。"
+        )
+    returned_ids = [str(item.get("id") or "") for item in proposed]
+    if returned_ids != expected_ids:
+        raise ValueError(
+            f"assignments id 或順序不一致：預期 {expected_ids}／模型 {returned_ids}。"
+        )
+    proposed_texts = [item.get("text") for item in proposed]
+    if not all(isinstance(item, str) for item in proposed_texts):
+        raise ValueError("assignments 的 text 必須全部是字串。")
 
     canonical_source = re.sub(r"\s+", "", source_text)
-    canonical_parts = [re.sub(r"\s+", "", item) for item in proposed]
+    canonical_parts = [re.sub(r"\s+", "", item) for item in proposed_texts]
     if any(not item for item in canonical_parts):
-        raise ValueError("模型產生空白字幕段。")
+        raise ValueError("模型產生空白固定 TC 字幕段。")
     joined = "".join(canonical_parts)
     if joined != canonical_source:
         raise ValueError(
@@ -2135,10 +2139,9 @@ def _parse_semantic_segments(raw_response: str, source_text: str) -> tuple[list[
             + _semantic_text_mismatch_detail(source_text, joined)
         )
 
-    # 只採用模型提供的每段字數；真正文字重新從 source 切出，確保零改字。
+    # 只採用模型提供的每槽字數；真正文字重新從校正版母稿切出，確保零改字。
     source_pos = 0
     rebuilt: list[str] = []
-    boundary_positions: list[int] = [0]
     for part_index, canonical_part in enumerate(canonical_parts):
         needed = len(canonical_part)
         counted = 0
@@ -2148,7 +2151,7 @@ def _parse_semantic_segments(raw_response: str, source_text: str) -> tuple[list[
                 counted += 1
             source_pos += 1
         if counted != needed:
-            raise ValueError("模型切點無法映射回原始文字。")
+            raise ValueError("模型分配無法映射回校正版母稿。")
         if part_index < len(canonical_parts) - 1:
             while source_pos < len(source_text) and source_text[source_pos].isspace():
                 source_pos += 1
@@ -2156,20 +2159,26 @@ def _parse_semantic_segments(raw_response: str, source_text: str) -> tuple[list[
         if not piece:
             raise ValueError("映射後出現空白字幕段。")
         rebuilt.append(piece)
-        boundary_positions.append(source_pos)
     if source_pos != len(source_text):
-        raise ValueError("模型切點未覆蓋完整原始文字。")
-    return rebuilt, boundary_positions
+        raise ValueError("模型分配未覆蓋完整校正版母稿。")
+    return rebuilt
+
+
+def _semantic_fixed_tc_row(index: int, chunk: dict, role: str) -> str:
+    ts = chunk.get("timestamp") or (chunk.get("start", 0.0), chunk.get("end", 0.0))
+    start = float(ts[0] if ts[0] is not None else 0.0)
+    end = float(ts[1] if ts[1] is not None else start)
+    text = strip_punct_for_srt((chunk.get("text") or "").strip())
+    return (
+        f"{role} TC{index + 1:04d} "
+        f"[{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}] {text}"
+    )
 
 
 def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
                               target_width: float = SRT_TARGET_LINE_WIDTH,
                               progress_cb=None) -> tuple[list[dict], dict]:
-    """以語意模型重新選擇整段口播切點，再逐字映射回原時間軸。
-
-    模型只提供切點。任何增刪改字、漏字、格式錯誤或請求失敗都會讓該次
-    ``complete`` 為 False，呼叫端應整份回退到本機斷句，避免混用兩種風格。
-    """
+    """以 5+5+5 重疊上下文把校正版母稿重分配到原本的固定 TC 槽位。"""
     global LAST_SEMANTIC_SEGMENTATION_META
     prepared: list[dict] = []
     for chunk in chunks:
@@ -2181,33 +2190,26 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
         prepared.append(item)
     if not prepared:
         meta = {
-            "complete": True, "input_count": len(chunks), "output_count": 0,
+            "complete": True, "usable": True, "input_count": len(chunks), "output_count": 0,
             "total_windows": 0, "failed_windows": [], "request_count": 0,
             "retry_count": 0, "integrity_retry_count": 0, "integrity_failures": 0,
+            "fixed_timecodes": True, "text_preserved": True,
         }
         LAST_SEMANTIC_SEGMENTATION_META = meta
         return [], meta
 
-    windows: list[list[dict]] = []
-    current: list[dict] = []
-    current_chars = 0
-    previous_end = None
-    for item in prepared:
-        ts = item.get("timestamp") or (item.get("start", 0.0), item.get("end", 0.0))
-        start = float(ts[0] if ts[0] is not None else 0.0)
-        end = float(ts[1] if ts[1] is not None else start)
-        text_len = len(re.sub(r"\s+", "", item["text"]))
-        strong_pause = current and previous_end is not None and start - previous_end >= 0.55
-        size_full = current and current_chars + text_len > SEMANTIC_SEGMENTATION_WINDOW_CHARS
-        if strong_pause or size_full:
-            windows.append(current)
-            current = []
-            current_chars = 0
-        current.append(item)
-        current_chars += text_len
-        previous_end = end
-    if current:
-        windows.append(current)
+    try:
+        write_groups = max(1, int(cfg.get("_semantic_write_groups", SEMANTIC_WRITE_GROUPS)))
+    except (TypeError, ValueError):
+        write_groups = SEMANTIC_WRITE_GROUPS
+    try:
+        context_groups = max(0, int(cfg.get("_semantic_context_groups", SEMANTIC_CONTEXT_GROUPS)))
+    except (TypeError, ValueError):
+        context_groups = SEMANTIC_CONTEXT_GROUPS
+    windows = [
+        (start, min(len(prepared), start + write_groups))
+        for start in range(0, len(prepared), write_groups)
+    ]
 
     configured_delays = cfg.get("_llm_retry_delays", LLM_RETRY_DELAYS)
     try:
@@ -2220,8 +2222,9 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
     )
     semantic_cfg = dict(cfg)
     semantic_cfg["_semantic_segmentation_pass"] = True
-    result: list[dict] = []
+    result = [dict(item) for item in prepared]
     failed_windows: list[int] = []
+    applied_windows: list[int] = []
     integrity_failures = 0
     request_count = 0
     retry_count = 0
@@ -2258,24 +2261,36 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
         return raw, error
 
     log_fn(
-        f"AI 語意斷句：可改切點、不可改字（字元流凍結後重映射時間）。"
-        f"共 {len(windows)} 段窗口。"
+        "AI 固定 TC 語意斷句：前後各 "
+        f"{context_groups} 組唯讀參考、中間 {write_groups} 組重新分配；"
+        f"TC 起訖不變，共 {len(windows)} 段窗口。"
     )
 
-    for window_index, window in enumerate(windows):
+    for window_index, (write_start, write_end) in enumerate(windows):
         if progress_cb:
             progress_cb(window_index, len(windows))
-        source_text, time_map = _semantic_window_text_map(window)
+        context_start = max(0, write_start - context_groups)
+        context_end = min(len(prepared), write_end + context_groups)
+        target_chunks = prepared[write_start:write_end]
+        source_text, _unused_time_map = _semantic_window_text_map(target_chunks)
         source_char_count = len(re.sub(r"\s+", "", source_text))
+        expected_ids = [f"TC{index + 1:04d}" for index in range(write_start, write_end)]
+        rows: list[str] = []
+        for index in range(context_start, context_end):
+            role = "【寫入】" if write_start <= index < write_end else "【參考】"
+            rows.append(_semantic_fixed_tc_row(index, prepared[index], role))
         user_msg = (
-            "【任務】只重新斷句（改切點）。原本斷句不好時請重切；"
-            "禁止校對、禁止改任何字。\n"
-            f"【約束】非空白字數必須 = {source_char_count}；"
-            "segments 依序串接並去掉空白後須與下文完全相同。\n"
-            "【本段唯一可輸出的文字】\n"
-            f"{source_text}"
+            "【任務】讀完前後文後，只重新分配標成【寫入】的固定 TC 槽位。\n"
+            "【固定 TC 與唯讀上下文】\n"
+            + "\n".join(rows)
+            + "\n【本次寫入槽位】\n"
+            + ", ".join(expected_ids)
+            + "\n【本次校正版母稿】\n"
+            + source_text
+            + f"\n【驗證】assignments 必須正好 {len(expected_ids)} 組；"
+            f"串接後非空白字數必須 = {source_char_count}，且與母稿逐字相同。"
         )
-        segments = positions = None
+        assignments = None
         parse_error = None
         request_error = None
         retry_message = user_msg
@@ -2284,7 +2299,9 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
             if request_error is not None or raw_response is None:
                 break
             try:
-                segments, positions = _parse_semantic_segments(raw_response, source_text)
+                assignments = _parse_semantic_assignments(
+                    raw_response, source_text, expected_ids
+                )
                 parse_error = None
                 break
             except Exception as exc:
@@ -2298,19 +2315,19 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
                     f"語意斷句第 {window_index + 1}/{len(windows)} 段未通過"
                     f"（{label}）：{exc}；"
                     f"已拒絕並重試 ({integrity_attempt + 1}/{integrity_retry_limit})。"
-                    "（提醒：可以重切，不能改字。）"
+                    "（提醒：可跨寫入槽位搬字，TC 與校正版母稿不可改。）"
                 )
                 retry_message = (
                     user_msg
                     + "\n\n【上一回合未通過】"
                     f"{exc}\n"
-                    "請只改 segments 的切開位置。"
-                    "segments 逐項串接並去掉空白後，必須與『本段唯一可輸出的文字』完全相同；"
+                    "請重新分配 assignments。id、數量與順序不可改；"
+                    "text 逐項串接並去掉空白後，必須與『本次校正版母稿』完全相同；"
                     f"非空白字數必須 = {source_char_count}。"
                     "不要校正錯字、不要改專名、不要加說明。"
                 )
 
-        if request_error is not None or segments is None or positions is None:
+        if request_error is not None or assignments is None:
             failed_windows.append(window_index + 1)
             if request_error is not None:
                 log_fn(f"警告：語意斷句第 {window_index + 1} 段請求失敗：{request_error}")
@@ -2322,47 +2339,43 @@ def semantic_resegment_chunks(chunks: list[dict], cfg: dict, log_fn,
                 )
             continue
 
-        if len(time_map) != len(source_text) + 1:
-            failed_windows.append(window_index + 1)
-            integrity_failures += 1
-            log_fn(f"警告：語意斷句第 {window_index + 1} 段內部字元時間映射長度不一致。")
-            continue
-        for segment_index, text_value in enumerate(segments):
-            start_pos = positions[segment_index]
-            end_pos = positions[segment_index + 1]
-            start_time = float(time_map[start_pos])
-            end_time = float(time_map[end_pos])
-            if end_time <= start_time:
-                end_time = start_time + 0.04
-            result.append({"text": text_value, "timestamp": (start_time, end_time)})
+        for offset, text_value in enumerate(assignments):
+            result[write_start + offset]["text"] = text_value
+        applied_windows.append(window_index + 1)
 
-    complete = not failed_windows and bool(result)
+    complete = not failed_windows
     meta = {
         "complete": complete,
+        "usable": bool(result),
+        "partial": bool(failed_windows and applied_windows),
         "input_count": len(prepared),
-        "output_count": len(result) if complete else 0,
+        "output_count": len(result),
         "total_windows": len(windows),
         "failed_windows": failed_windows,
+        "applied_windows": applied_windows,
         "request_count": request_count,
         "retry_count": retry_count,
         "integrity_retry_count": integrity_retry_count,
         "integrity_failures": integrity_failures,
         "target_width": float(target_width),
-        "text_preserved": complete,
+        "write_groups": write_groups,
+        "context_groups": context_groups,
+        "fixed_timecodes": True,
+        "text_preserved": True,
     }
     if complete:
         log_fn(
-            f"AI 語意斷句通過：{len(prepared)} 組原文重切為 {len(result)} 組；"
-            "文字未改、僅切點與時間軸重映射。"
+            f"AI 固定 TC 語意斷句通過：{len(result)} 組 TC 起訖與順序完全不變；"
+            "僅重新分配校正版母稿。"
         )
     else:
         log_fn(
-            "AI 語意斷句未完整通過：不是「禁止改斷句」，而是模型回傳無法通過"
-            "「只改切點、字元流不變」驗證（改字／JSON／截斷等）。"
-            "將整份改用本機安全斷句，避免 AI 與本機切句風格混用。"
+            f"AI 固定 TC 語意斷句局部完成：成功窗口 {applied_windows or '—'}；"
+            f"失敗窗口 {failed_windows or '—'} 保留原校正版文字分配。"
+            "不重算 TC，也不讓整份字幕回退。"
         )
     LAST_SEMANTIC_SEGMENTATION_META = meta
-    return (result if complete else []), meta
+    return result, meta
 
 # ═══════════════════════════════════════════════════════════
 #  主視窗

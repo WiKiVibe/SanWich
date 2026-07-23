@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from datetime import date
 from pathlib import Path
 import tempfile
 import unittest
@@ -24,6 +25,56 @@ RULES = load_module("sanwich_rules_test", ROOT / "core" / "personal_rules.py")
 
 
 class LicenseAndRulesTests(unittest.TestCase):
+    def test_new_trial_is_exactly_fourteen_calendar_days(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "APPDATA": str(Path(tmp) / "roaming"),
+                "LOCALAPPDATA": str(Path(tmp) / "local"),
+                "SANWICH_LICENSE_REGISTRY_DISABLED": "1",
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                manager = LICENSE.LicenseManager()
+                started = date.fromisoformat(manager.license_data["trial_started_at"])
+                ends = date.fromisoformat(manager.license_data["trial_ends_at"])
+
+                self.assertEqual((ends - started).days + 1, 14)
+                self.assertEqual(manager.status_summary()["days_left"], 14)
+
+    def test_existing_thirty_day_trial_keeps_original_end_date(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "APPDATA": str(Path(tmp) / "roaming"),
+                "LOCALAPPDATA": str(Path(tmp) / "local"),
+                "SANWICH_LICENSE_REGISTRY_DISABLED": "1",
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                manager = LICENSE.LicenseManager()
+                existing = dict(manager.license_data)
+                existing["trial_ends_at"] = "2099-12-31"
+                existing = LICENSE._sign(existing)
+                manager._write(existing)
+
+                reloaded = LICENSE.LicenseManager()
+                self.assertEqual(reloaded.license_data["trial_ends_at"], "2099-12-31")
+
+    def test_server_activation_retires_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "APPDATA": str(Path(tmp) / "roaming"),
+                "LOCALAPPDATA": str(Path(tmp) / "local"),
+                "SANWICH_LICENSE_REGISTRY_DISABLED": "1",
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                manager = LICENSE.LicenseManager()
+                legacy = dict(manager.license_data)
+                legacy.update(edition="supporter", supporter_enabled=True, supporter_key="SW2-LEGACY-PLACEHOLDER")
+                manager.license_data = LICENSE._sign(legacy)
+                manager._write(manager.license_data)
+
+                manager._retire_legacy_key_after_server_activation()
+                self.assertEqual(manager.license_data["supporter_key"], "")
+                self.assertFalse(manager.license_data["supporter_enabled"])
+
     def test_trial_survives_primary_file_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:
             roaming = Path(tmp) / "roaming"

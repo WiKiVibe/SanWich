@@ -9,3 +9,4 @@ sherpa-onnx
 sounddevice
 tkinterdnd2
 transformers
+cryptography>=43,<48

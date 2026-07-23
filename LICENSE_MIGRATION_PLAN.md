@@ -6,7 +6,7 @@
 
 ## 1. 現況摘要
 
-- 現行授權是本機信任制：30 天 Supporter Trial 加上可永久離線驗證的 `SW2` Supporter Key。
+- 舊版授權是本機信任制：Trial 加上可永久離線驗證的 `SW2` Supporter Key；v2.5 新使用者改為 14 天 Trial。
 - 第一次啟動會建立試用資料；試用到期只回到 Free，不鎖住核心功能。
 - 授權狀態同時寫入 `%APPDATA%`、`%LOCALAPPDATA%` 與 Windows 登錄檔。刪除其中一份會由其他有效副本復原。
 - 正式 Supporter 判定只看 `supporter_key` 的 RSA 簽章是否有效；`edition` 與 `supporter_enabled` 不是權限真相來源。
@@ -30,7 +30,7 @@
    - 若任何副本含有效 `SW2` Key，優先從有效 Supporter 狀態選擇。
    - `trial_started_at` 與 `trial_ends_at` 採所有有效副本中最早日期，避免刪除單一檔案重設試用。
    - 選定結果重新簽章後回寫三個位置。
-6. 若完全沒有舊狀態，建立 30 天 Trial 並寫入三個位置。
+6. 若完全沒有舊狀態，建立 14 天 Trial 並寫入三個位置。
 7. 若已存在檔案／登錄資料但全部無效，不建立新 Trial，直接回 Free。
 8. 授權模組載入或執行失敗時，主程式備援只開放 Free 功能。
 
@@ -163,7 +163,7 @@
 ## 7. 新舊狀態的共存原則
 
 - 新版正式授權使用 `license_v2.json`、DPAPI 裝置私鑰與伺服器簽章 Token。
-- 舊 `license.json` 的 Trial 錨點先保留，避免更新後重新取得 30 天試用。
+- 舊 `license.json` 的 Trial 錨點先保留，避免更新後重設或縮短試用。
 - 新版 Full Token 有效時，正式權限只由 Token 判定，不再由 `supporter_key` 判定。
 - 舊 `SW2` Key 只在遷移入口驗證，不應在遷移後繼續作為新版完整版的長期 fallback。
 - 新版 API 暫時不可用時，已啟用者使用未過期 Token；沒有 Token 的舊 Key 使用者可繼續用舊版程式，但新版是否給予短期遷移寬限必須在發布前明確決定。
@@ -295,7 +295,7 @@
 - 刪除任一舊 Trial 錨點不會取得新 Trial。
 - 有效 Token 在離線期限內可用，過期後只關閉 Full。
 - Token 被修改、換裝置、`kid` 未知、`aud` 錯誤或 `alg=none` 一律無效。
-- 30 天重新驗證加 15 天離線寬限符合伺服器時間。
+- 30 天重新驗證加 14 天離線寬限符合伺服器時間。
 - 伺服器 5xx／斷網與明確 401／403 的行為不同。
 - 第 1、2 台可啟用；第 3 台拒絕；同裝置重試不增加名額。
 - 成功停用後才清除本機授權，重送不重複釋放。
@@ -316,3 +316,23 @@
 - Beta 明確截止日與是否允許轉正式授權。
 - 新授權 API 正式網域與 Worker repository 所在位置。
 - 裝置管理頁、90 天自助替換與人工客服流程是否與第一版同時上線。
+
+## 14. 目前實作狀態（2026-07-23）
+
+### 已完成本階段
+
+- 已建立 `LICENSE_ANALYSIS.md`，內容以目前 `SanWich.py` 與 `core/license_manager.py` 實際程式為準。
+- 已新增 `core/license_service.py`：Ed25519 Token 離線驗證、Server Activate／Verify／Deactivate／Migration、30 天複驗狀態、Grace／Free 降級、Token 雙位置原子保存。
+- 已在 `core/license_manager.py` 保留 `has_feature()` facade；有新版 Token 時，完整版權限改由 Token 決定。
+- 已在 `SanWich.py` 設定頁加入新版完整版 Key 啟用與明確遷移舊版 SW2 Key 的入口。
+- 已加入 DPAPI 保護的裝置密鑰保存；目前 Server API 尚未提供 nonce challenge，因此暫不宣稱完成公鑰持有證明。
+- 已加入 `cryptography` 依賴與新版離線 Token 測試。
+- 正式 Worker／APAC D1 已部署至 `https://wikivibe-license-server.wikivibe.workers.dev`，正式公開金鑰已內建。
+- 已匯入目前台帳中的 1 組已發行 `SW2` Key 為 Legacy eligible；沒有把完整 Key 存入 D1。
+- 正式環境 smoke 已通過：兩台啟用、第三台拒絕、停用釋放名額、重新驗證、撤銷拒絕與明確撤銷後清除本機 Token。
+- v2.5 新增 14 天 Trial 與小型簽章更新包；完整測試現為 64 項，另有 GUI smoke 與更新套用保存測試。
+
+### 尚未完成
+
+- 尚未建立 nonce challenge、復原碼、裝置管理頁、90 天換機限制與完整 Idempotency-Key 回應重播。
+- 尚待乾淨 Windows 實機跑完整安裝流程；目前已完成原始碼 GUI smoke、正式 Server 端到端驗證、v2.5 建置與更新包套用驗證。

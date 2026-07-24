@@ -20,14 +20,14 @@ class UpdaterTests(unittest.TestCase):
         release = {
             "tag_name": "v2.5",
             "assets": [{
-                "name": "SanWich_update_v2.5.zip",
-                "browser_download_url": "https://github.com/WiKiVibe/SanWich/releases/download/v2.5/SanWich_update_v2.5.zip",
+                "name": "SanWich_Setup_v2.5.exe",
+                "browser_download_url": "https://github.com/WiKiVibe/SanWich/releases/download/v2.5/SanWich_Setup_v2.5.exe",
                 "digest": "sha256:" + "a" * 64,
                 "size": 123,
             }],
         }
         asset = UPDATER.select_update_asset(release)
-        self.assertEqual(asset["name"], "SanWich_update_v2.5.zip")
+        self.assertEqual(asset["name"], "SanWich_Setup_v2.5.exe")
 
         release["assets"][0]["digest"] = None
         self.assertIsNone(UPDATER.select_update_asset(release))
@@ -35,11 +35,11 @@ class UpdaterTests(unittest.TestCase):
     def test_download_verifies_size_and_sha256(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / "source.zip"
+            source = root / "source.exe"
             source.write_bytes(b"verified update")
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
             asset = {
-                "name": "SanWich_update_v2.5.zip",
+                "name": "SanWich_Setup_v2.5.exe",
                 "url": source.as_uri(),
                 "digest": digest,
                 "size": source.stat().st_size,
@@ -84,6 +84,61 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((install / "app" / "probe.txt").read_bytes(), payload)
             self.assertIn("KEEP_ME", (install / "app" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual((install / "app" / ".venv" / "keep.txt").read_text(), "KEEP_VENV")
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell Setup helper is Windows-only")
+    def test_setup_helper_runs_silent_installer_and_writes_result(self):
+        with tempfile.TemporaryDirectory(prefix="SanWich_setup_helper_test_") as tmp:
+            root = Path(tmp)
+            install = root / "install"
+            install.mkdir()
+            package = root / "fake_setup.cmd"
+            package.write_text("@echo off\r\nexit /b 0\r\n", encoding="ascii")
+            relaunch = install / "SanWich.exe"
+            relaunch.write_bytes(b"not launched during the test")
+            result = root / "result.json"
+
+            completed = subprocess.run([
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(ROOT / "scripts" / "update" / "update_helper.ps1"),
+                "-PackagePath", str(package), "-InstallRoot", str(install),
+                "-ParentPid", "999999", "-RelaunchPath", str(relaunch),
+                "-ResultPath", str(result),
+            ], check=False, capture_output=True, text=True, timeout=30)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(result.read_text(encoding="utf-8-sig"))["status"], "success")
+            self.assertFalse(package.exists())
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell Setup helper is Windows-only")
+    def test_setup_helper_restores_previous_app_after_installer_failure(self):
+        with tempfile.TemporaryDirectory(prefix="SanWich_setup_rollback_test_") as tmp:
+            root = Path(tmp)
+            install = root / "install"
+            internal = install / "_internal"
+            internal.mkdir(parents=True)
+            relaunch = install / "SanWich.exe"
+            relaunch.write_bytes(b"previous-app")
+            marker = internal / "previous.txt"
+            marker.write_text("keep", encoding="ascii")
+            package = root / "failing_setup.cmd"
+            package.write_text(
+                f'@echo off\r\ndel /q "{relaunch}"\r\nexit /b 9\r\n',
+                encoding="ascii",
+            )
+            result = root / "result.json"
+
+            completed = subprocess.run([
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(ROOT / "scripts" / "update" / "update_helper.ps1"),
+                "-PackagePath", str(package), "-InstallRoot", str(install),
+                "-ParentPid", "999999", "-RelaunchPath", str(relaunch),
+                "-ResultPath", str(result),
+            ], check=False, capture_output=True, text=True, timeout=30)
+            data = json.loads(result.read_text(encoding="utf-8-sig"))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(data["status"], "failed")
+            self.assertIn("Previous version restored", data["message"])
+            self.assertEqual(relaunch.read_bytes(), b"previous-app")
+            self.assertEqual(marker.read_text(encoding="ascii"), "keep")
 
 
 if __name__ == "__main__":

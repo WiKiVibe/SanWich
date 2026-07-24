@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""SanWich release updater helpers.
+"""SanWich installer updater helpers.
 
-The application downloads only a GitHub Release update asset, verifies the
-SHA-256 digest supplied by GitHub, then hands installation to a separate
-PowerShell process so the running application never overwrites itself.
+The application downloads only the exact GitHub Release Setup executable,
+verifies the SHA-256 digest supplied by GitHub, then hands installation to a
+separate PowerShell process so the running application never overwrites itself.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Callable
 
 
-UPDATE_ASSET_PREFIX = "SanWich_update_v"
-UPDATE_ASSET_SUFFIX = ".zip"
+UPDATE_ASSET_PREFIX = "SanWich_Setup_v"
+UPDATE_ASSET_SUFFIX = ".exe"
 
 
 class UpdateError(RuntimeError):
@@ -40,7 +40,7 @@ def expected_asset_name(version: str) -> str:
 
 
 def select_update_asset(release: dict) -> dict | None:
-    """Return the exact update ZIP asset only when GitHub provides SHA-256."""
+    """Return the exact Setup EXE only when GitHub provides SHA-256."""
     expected = expected_asset_name(str(release.get("tag_name") or ""))
     for raw in release.get("assets") or []:
         if not isinstance(raw, dict) or raw.get("name") != expected:
@@ -121,5 +121,6 @@ def launch_installer(
         "-ParentPid", str(parent_pid or os.getpid()),
         "-RelaunchPath", str(relaunch_path),
         "-ResultPath", str(result_path),
+        "-DeleteSelf",
     ]
     return subprocess.Popen(command, cwd=str(package_path.parent), close_fds=True)

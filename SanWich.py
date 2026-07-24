@@ -1794,8 +1794,8 @@ class App(ctk.CTk):
         latest = str(release.get("tag_name") or "").strip()
         url = str(release.get("html_url") or GITHUB_RELEASES_URL)
         asset = UPDATER.select_update_asset(release) if UPDATER is not None else None
-        packaged_layout = here().name.lower() == "app" and (here() / "update_helper.ps1").is_file()
-        can_install = bool(asset and packaged_layout and sys.platform.startswith("win"))
+        update_context = self._installed_exe_update_context()
+        can_install = bool(asset and update_context and sys.platform.startswith("win"))
         action_text = "是否立即下載並自動更新？" if can_install else "此版本需要使用完整安裝包更新，是否前往下載頁？"
         should_update = messagebox.askyesno(
             "發現新版本",
@@ -1808,11 +1808,30 @@ class App(ctk.CTk):
         if not should_update:
             return
         if can_install:
-            self.install_update_async(asset, latest)
+            self.install_update_async(asset, latest, update_context)
         else:
             webbrowser.open_new_tab(url)
 
-    def install_update_async(self, asset: dict, latest: str):
+    @staticmethod
+    def _installed_exe_update_context() -> dict | None:
+        """Return paths required for Setup-based self-update in an installed EXE."""
+        if not sys.platform.startswith("win") or not getattr(sys, "frozen", False):
+            return None
+        executable = Path(sys.executable).resolve()
+        helper_candidates = [
+            here() / "update_helper.ps1",
+            executable.parent / "_internal" / "update_helper.ps1",
+        ]
+        helper = next((path for path in helper_candidates if path.is_file()), None)
+        if helper is None:
+            return None
+        return {
+            "helper": helper,
+            "install_root": executable.parent,
+            "relaunch": executable,
+        }
+
+    def install_update_async(self, asset: dict, latest: str, update_context: dict):
         self.status_text.set(f"正在下載 SanWich {latest} 更新…")
         self.log(f"開始下載更新 {asset['name']}。", "model")
 
@@ -1823,15 +1842,11 @@ class App(ctk.CTk):
         def worker():
             try:
                 package = UPDATER.download_verified_asset(asset, progress=progress)
-                helper = here() / "update_helper.ps1"
-                relaunch = here() / "run_hidden.vbs"
-                if not relaunch.exists():
-                    relaunch = here() / "run_app.bat"
                 UPDATER.launch_installer(
                     package,
-                    helper_path=helper,
-                    install_root=here().parent,
-                    relaunch_path=relaunch,
+                    helper_path=Path(update_context["helper"]),
+                    install_root=Path(update_context["install_root"]),
+                    relaunch_path=Path(update_context["relaunch"]),
                     result_path=local_data_dir() / "update_result.json",
                 )
                 self.after(0, self._close_for_update)

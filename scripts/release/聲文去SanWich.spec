@@ -37,7 +37,7 @@ datas = [
     # 安全：絕不打包含真實 API Key 的 config.json；缺檔時程式會用預設值自動重建
     ('config.example.json', '.'),
     ('docs/申請API_Key教學.md', 'docs'),
-    ('scripts/update/apply_update.ps1', '.'),
+    ('scripts/update/update_helper.ps1', '.'),
 ]
 
 # 只保留真的存在的檔案，並轉成絕對路徑，避免 PyInstaller 以 spec 目錄解析。

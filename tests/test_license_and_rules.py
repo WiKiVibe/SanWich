@@ -40,7 +40,7 @@ class LicenseAndRulesTests(unittest.TestCase):
                 self.assertEqual((ends - started).days + 1, 14)
                 self.assertEqual(manager.status_summary()["days_left"], 14)
 
-    def test_existing_thirty_day_trial_keeps_original_end_date(self):
+    def test_old_trial_state_is_not_carried_forward(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = {
                 "APPDATA": str(Path(tmp) / "roaming"),
@@ -48,32 +48,20 @@ class LicenseAndRulesTests(unittest.TestCase):
                 "SANWICH_LICENSE_REGISTRY_DISABLED": "1",
             }
             with mock.patch.dict(os.environ, env, clear=False):
-                manager = LICENSE.LicenseManager()
-                existing = dict(manager.license_data)
-                existing["trial_ends_at"] = "2099-12-31"
-                existing = LICENSE._sign(existing)
-                manager._write(existing)
+                path = LICENSE.license_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    '{"edition":"supporter","trial_started_at":"2020-01-01",'
+                    '"trial_ends_at":"2099-12-31","supporter_enabled":true,'
+                    '"supporter_key":"SW2-OLD-KEY","signature":"old"}',
+                    encoding="utf-8",
+                )
 
                 reloaded = LICENSE.LicenseManager()
-                self.assertEqual(reloaded.license_data["trial_ends_at"], "2099-12-31")
-
-    def test_server_activation_retires_legacy_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env = {
-                "APPDATA": str(Path(tmp) / "roaming"),
-                "LOCALAPPDATA": str(Path(tmp) / "local"),
-                "SANWICH_LICENSE_REGISTRY_DISABLED": "1",
-            }
-            with mock.patch.dict(os.environ, env, clear=False):
-                manager = LICENSE.LicenseManager()
-                legacy = dict(manager.license_data)
-                legacy.update(edition="supporter", supporter_enabled=True, supporter_key="SW2-LEGACY-PLACEHOLDER")
-                manager.license_data = LICENSE._sign(legacy)
-                manager._write(manager.license_data)
-
-                manager._retire_legacy_key_after_server_activation()
-                self.assertEqual(manager.license_data["supporter_key"], "")
-                self.assertFalse(manager.license_data["supporter_enabled"])
+                self.assertEqual(reloaded.license_data["schema_version"], LICENSE.LICENSE_STATE_SCHEMA)
+                self.assertNotEqual(reloaded.license_data["trial_started_at"], "2020-01-01")
+                self.assertNotEqual(reloaded.license_data["trial_ends_at"], "2099-12-31")
+                self.assertNotIn("supporter_key", reloaded.license_data)
 
     def test_trial_survives_primary_file_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -95,7 +83,7 @@ class LicenseAndRulesTests(unittest.TestCase):
                 self.assertTrue(recovered.has_feature("single_transcription"))
                 self.assertTrue(recovered.has_feature("custom_rules"))
 
-    def test_invalid_existing_license_falls_back_to_free(self):
+    def test_invalid_existing_license_starts_current_trial(self):
         with tempfile.TemporaryDirectory() as tmp:
             roaming = Path(tmp) / "roaming"
             local = Path(tmp) / "local"
@@ -110,15 +98,15 @@ class LicenseAndRulesTests(unittest.TestCase):
                 path.write_text('{"edition":"trial","trial_started_at":"2099-01-01"}', encoding="utf-8")
                 manager = LICENSE.LicenseManager()
 
-                self.assertFalse(manager.is_trial_active())
+                self.assertTrue(manager.is_trial_active())
                 self.assertTrue(manager.has_feature("single_transcription"))
-                self.assertFalse(manager.has_feature("custom_rules"))
+                self.assertTrue(manager.has_feature("custom_rules"))
 
     def test_rule_selection_and_human_counts_are_persisted(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "personal_rules.json"
             store = RULES.RuleStore(path)
-            rule = store.add("萬歌", "萬哥", domain="訪談")
+            rule = store.add("范例", "範例", domain="訪談")
             store.save()
 
             selected = RULES.select_rules_for_prompt(store, domain="訪談")
@@ -127,7 +115,7 @@ class LicenseAndRulesTests(unittest.TestCase):
             store.save()
 
             reloaded = RULES.RuleStore(path)
-            saved = reloaded.find("萬歌", "萬哥")
+            saved = reloaded.find("范例", "範例")
             self.assertIsNotNone(saved)
             self.assertEqual(saved["adopted_count"], 1)
 
@@ -143,7 +131,7 @@ class LicenseAndRulesTests(unittest.TestCase):
                 app = load_module("sanwich_app_rule_gate_test", app_path)
                 rules_path = Path(tmp) / "personal_rules.json"
                 store = app.PERSONAL_RULES.RuleStore(rules_path)
-                store.add("萬歌", "萬哥", domain="訪談")
+                store.add("范例", "範例", domain="訪談")
                 store.save()
                 app.PERSONAL_RULES_PATH = rules_path
 
@@ -151,7 +139,7 @@ class LicenseAndRulesTests(unittest.TestCase):
 
                 def fake_llm(system, _user_msg, _cfg):
                     captured.append(system)
-                    return "萬哥"
+                    return "範例"
 
                 app._LEGACY_LLM_CALL_ONCE = fake_llm
                 cfg = {
@@ -163,12 +151,12 @@ class LicenseAndRulesTests(unittest.TestCase):
                 }
 
                 app.has_feature = lambda _name: False
-                app._llm_call_once_with_deepseek("基本指令", "萬歌", cfg)
-                self.assertNotIn("「萬歌」→「萬哥」", captured[-1])
+                app._llm_call_once_with_deepseek("基本指令", "范例", cfg)
+                self.assertNotIn("「范例」→「範例」", captured[-1])
 
                 app.has_feature = lambda _name: True
-                app._llm_call_once_with_deepseek("基本指令", "萬歌", cfg)
-                self.assertIn("「萬歌」→「萬哥」", captured[-1])
+                app._llm_call_once_with_deepseek("基本指令", "范例", cfg)
+                self.assertIn("「范例」→「範例」", captured[-1])
 
 
 if __name__ == "__main__":

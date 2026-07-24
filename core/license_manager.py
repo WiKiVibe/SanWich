@@ -1,20 +1,13 @@
 # -*- coding: utf-8 -*-
-"""SanWich 輕量授權管理（信任制）。
+"""SanWich 授權管理。
 
-原則（見 SUPPORTER_PLAN.md）：
-- 不做強制登入、不連網驗證、不做硬體綁定。
-- Trial 到期只回到 Free 模式，絕不鎖住 Free 功能。
-- 授權任何環節失敗，Free 功能一律照常可用。
-
-license.json 位置：
-  Windows: %APPDATA%/SanWich/license.json
-  macOS:   ~/Library/Application Support/SanWich/license.json
-  其他:    ~/.config/SanWich/license.json
+完整版只接受 WiKiVibe License Server 簽發的新版 Key。舊版 SW2 Key、
+舊版授權狀態與舊試用日期不再讀取或遷移。Trial 到期或授權服務失敗時，
+基本功能一律維持可用。
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import importlib.util
@@ -29,25 +22,17 @@ try:
 except Exception:
     winreg = None
 
-# 新使用者可使用 14 個曆日的完整版試用；起始日算第 1 天。
-# 舊版已寫入的 trial_ends_at 永遠沿用，不會因更新而縮短或重設。
+# 新版授權狀態從 schema 3 重新計算，不承接舊版 Trial 日期。
+# 起始日算第 1 天。
 TRIAL_DAYS = 14
+LICENSE_STATE_SCHEMA = 3
 
 DEFAULT_LICENSE_PRODUCT_ID = "sanwich"
 DEFAULT_LICENSE_API_BASE_URL = "https://wikivibe-license-server.wikivibe.workers.dev"
 DEFAULT_LICENSE_ISSUER = "https://wikivibe-license-server.wikivibe.workers.dev"
 DEFAULT_LICENSE_PUBLIC_KEY_SPKI = "MCowBQYDK2VwAyEAkSWQwsY0BGQ5CUYgTuY8cy3VyF1L5a-_3o4mRnVb9rU"
 
-_LOCAL_STATE_SALT = b"SanWich-Local-License-State-v2-2026"
-_LEGACY_LOCAL_STATE_SALT = b"SanWich-TrustBased-License-v1-2026"
-_SUPPORTER_KEY_PREFIX = "SW2"
-_SUPPORTER_MESSAGE_PREFIX = b"SanWich supporter key v2\0"
-_SHA256_DER_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
-_SUPPORTER_PUBLIC_N = int(
-    "13812019485706679660590446948791603793822765697603914583237325443061621194568002993754301496261106604493558872178779984044205123465743310816421995828947077608261231035125189987663058874108818250805280266941042176657281356788902010093607218412722896791106438628821462785010854796639733244744826936673196787750955393699752576964183215502673372943492206632367202867861902762877803463854661831440673268462145092966268102785401644058612662355432603990165815362488837024426213890937789245666328947795274771118518256004451345941742617732263876335522042707277623919650961913732820830960203135489770887667868382906564612668669"
-)
-_SUPPORTER_PUBLIC_E = 65537
-_SUPPORTER_SIGNATURE_BYTES = 256
+_LOCAL_STATE_SALT = b"SanWich-Local-Trial-State-v3-2026"
 _REGISTRY_PATH = r"Software\WiKiVibe\SanWich"
 _REGISTRY_VALUE = "LicenseState"
 
@@ -182,11 +167,10 @@ def _write_registry_state(data: dict) -> None:
 # ── 簽章 ─────────────────────────────────────────────────────────
 
 
-def _payload_signature(data: dict, salt: bytes = _LOCAL_STATE_SALT) -> str:
-    fields = ["edition", "trial_started_at", "trial_ends_at",
-              "supporter_enabled", "supporter_key"]
+def _payload_signature(data: dict) -> str:
+    fields = ["schema_version", "edition", "trial_started_at", "trial_ends_at"]
     payload = "|".join(str(data.get(k, "")) for k in fields)
-    return hmac.new(salt, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.new(_LOCAL_STATE_SALT, payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _sign(data: dict) -> dict:
@@ -197,59 +181,7 @@ def _sign(data: dict) -> dict:
 def _signature_ok(data: dict) -> bool:
     sig = str(data.get("signature", ""))
     try:
-        return hmac.compare_digest(sig, _payload_signature(data)) or hmac.compare_digest(
-            sig, _payload_signature(data, _LEGACY_LOCAL_STATE_SALT)
-        )
-    except Exception:
-        return False
-
-
-# ── Supporter Key ────────────────────────────────────────────────
-
-
-def _b32_decode(value: str) -> bytes:
-    value = "".join(ch for ch in (value or "").upper() if ch.isalnum())
-    if not value:
-        return b""
-    return base64.b32decode(value + "=" * ((8 - len(value) % 8) % 8))
-
-
-def _supporter_message(body: str) -> bytes:
-    return _SUPPORTER_MESSAGE_PREFIX + body.encode("ascii")
-
-
-def _expected_encoded_digest(body: str) -> bytes:
-    digest = hashlib.sha256(_supporter_message(body)).digest()
-    payload = _SHA256_DER_PREFIX + digest
-    padding_len = _SUPPORTER_SIGNATURE_BYTES - len(payload) - 3
-    if padding_len < 8:
-        return b""
-    return b"\x00\x01" + b"\xff" * padding_len + b"\x00" + payload
-
-
-def normalize_key(key: str) -> str:
-    key = (key or "").strip().upper()
-    return "".join(ch for ch in key if ch.isalnum() or ch == "-")
-
-
-def verify_supporter_key(key: str) -> bool:
-    raw = normalize_key(key)
-    parts = raw.split("-")
-    if len(parts) != 3 or parts[0] != _SUPPORTER_KEY_PREFIX:
-        return False
-    body, signature_text = parts[1], parts[2]
-    if len(body) < 12:
-        return False
-    try:
-        signature = _b32_decode(signature_text)
-        if len(signature) != _SUPPORTER_SIGNATURE_BYTES:
-            return False
-        decoded = pow(
-            int.from_bytes(signature, "big"),
-            _SUPPORTER_PUBLIC_E,
-            _SUPPORTER_PUBLIC_N,
-        ).to_bytes(_SUPPORTER_SIGNATURE_BYTES, "big")
-        return hmac.compare_digest(decoded, _expected_encoded_digest(body))
+        return hmac.compare_digest(sig, _payload_signature(data))
     except Exception:
         return False
 
@@ -311,11 +243,10 @@ class LicenseManager:
     def _new_trial(self) -> dict:
         today = date.today()
         data = {
+            "schema_version": LICENSE_STATE_SCHEMA,
             "edition": "trial",
             "trial_started_at": today.isoformat(),
             "trial_ends_at": (today + timedelta(days=TRIAL_DAYS - 1)).isoformat(),
-            "supporter_enabled": False,
-            "supporter_key": "",
         }
         return _sign(data)
 
@@ -337,7 +268,9 @@ class LicenseManager:
     def _valid_state(data: dict | None) -> bool:
         return bool(
             isinstance(data, dict)
+            and data.get("schema_version") == LICENSE_STATE_SCHEMA
             and data.get("trial_started_at")
+            and data.get("trial_ends_at")
             and _signature_ok(data)
         )
 
@@ -349,11 +282,7 @@ class LicenseManager:
             except Exception:
                 return "9999-12-31"
 
-        supporter_states = [
-            data for data in states
-            if verify_supporter_key(str(data.get("supporter_key", "")))
-        ]
-        selected = dict(min(supporter_states or states, key=start_value))
+        selected = dict(min(states, key=start_value))
         selected["trial_started_at"] = min(start_value(data) for data in states)
 
         valid_ends = []
@@ -380,16 +309,7 @@ class LicenseManager:
             self._write(data)
             return data
 
-        # Existing but invalid state must never be replaced with a fresh trial.
-        if primary_path.exists() or anchor_path.exists() or any(raw_states):
-            return {
-                "edition": "free",
-                "trial_started_at": "",
-                "trial_ends_at": "",
-                "supporter_enabled": False,
-                "supporter_key": "",
-                "signature": "",
-            }
+        # 舊版或損壞狀態一律不承接，直接建立目前 schema 的 Trial。
         data = self._new_trial()
         self._write(data)
         return data
@@ -406,9 +326,6 @@ class LicenseManager:
             return False
         return ends >= date.today()
 
-    def is_supporter_active(self) -> bool:
-        return verify_supporter_key(str(self.license_data.get("supporter_key", "")))
-
     def has_feature(self, feature_name: str) -> bool:
         if feature_name in FREE_FEATURES:
             return True
@@ -421,7 +338,7 @@ class LicenseManager:
                     return self.server_service.has_feature(feature_name, free_features=FREE_FEATURES)
                 except Exception:
                     return False
-            return self.is_trial_active() or self.is_supporter_active()
+            return self.is_trial_active()
         return False
 
     # 啟用 Key ------------------------------------------------------
@@ -430,7 +347,6 @@ class LicenseManager:
         if self.server_service is not None:
             try:
                 self.server_service.activate(key)
-                self._retire_legacy_key_after_server_activation()
                 self.last_license_error = ""
                 self.last_license_error_code = ""
                 return True
@@ -438,37 +354,9 @@ class LicenseManager:
                 self.last_license_error = str(error)
                 self.last_license_error_code = str(getattr(error, "code", ""))
                 return False
-        if not verify_supporter_key(key):
-            return False
-        data = dict(self.license_data)
-        data["edition"] = "supporter"
-        data["supporter_enabled"] = True
-        data["supporter_key"] = normalize_key(key)
-        self.license_data = _sign(data)
-        self._write(self.license_data)
-        return True
-
-    def migrate_legacy_key(self, key: str) -> dict | None:
-        """Explicitly migrate a verified legacy key through the new server."""
-        if self.server_service is None:
-            return None
-        try:
-            result = self.server_service.migrate_legacy(key)
-            self._retire_legacy_key_after_server_activation()
-            return result
-        except Exception:
-            return None
-
-    def _retire_legacy_key_after_server_activation(self) -> None:
-        """Prevent a migrated SW2 key from bypassing later server revocation."""
-        data = dict(self.license_data)
-        if not data.get("trial_started_at"):
-            return
-        data["edition"] = "free"
-        data["supporter_enabled"] = False
-        data["supporter_key"] = ""
-        self.license_data = _sign(data)
-        self._write(self.license_data)
+        self.last_license_error = "線上授權服務尚未設定完成。"
+        self.last_license_error_code = "NOT_CONFIGURED"
+        return False
 
     def refresh_server_license(self) -> bool:
         """Refresh a cached server token; network failures are non-fatal."""
@@ -509,9 +397,6 @@ class LicenseManager:
                 }
             except Exception:
                 pass
-        if self.is_supporter_active():
-            return {"mode": "supporter", "label": "完整版（感謝支持！）",
-                    "trial_ends_at": "", "days_left": -1}
         ends = str(self.license_data.get("trial_ends_at", ""))
         if self.is_trial_active():
             try:

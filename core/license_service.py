@@ -284,19 +284,6 @@ class LicenseService:
         self._save_token(token)
         return result
 
-    def migrate_legacy(self, legacy_key: str, *, device_name: str | None = None) -> dict[str, Any]:
-        result = self._post("/v1/license/migrate-legacy", {
-            "legacy_key": legacy_key,
-            "product_id": self.product_id,
-            "device": self._device(device_name),
-            "app_version": self.app_version,
-        })
-        token = result.get("license_token")
-        if not isinstance(token, str):
-            raise LicenseServiceError("INVALID_RESPONSE", "遷移回應缺少授權 Token。")
-        self._save_token(token)
-        return result
-
     def refresh(self) -> dict[str, Any]:
         cache = self._read_cache()
         if not cache:

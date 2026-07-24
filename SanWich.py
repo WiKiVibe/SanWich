@@ -601,7 +601,7 @@ def license_status_summary() -> dict:
 
 
 DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]
-LOCAL_MODELS = [getattr(LOCAL_LLM, "MODEL_LABEL", "Breeze-7B-Instruct v1.0（本機 Q4_K_M）")]
+LOCAL_MODELS = [getattr(LOCAL_LLM, "MODEL_LABEL", "Breeze-7B-Instruct v1.0 (Local Q4_K_M)")]
 PROVIDER_ORDER = ["local", "gemini", "openai", "claude", "deepseek"]
 _LEGACY_OPENROUTER_MODELS = tuple(getattr(CORE, "OPENROUTER_MODELS", ["google/gemma-3-27b-it:free"]))
 _LEGACY_LLM_CALL_ONCE = getattr(CORE, "_llm_call_once")
@@ -1652,6 +1652,7 @@ class App(ctk.CTk):
             self.log("拖放套件未載入；仍可使用「選擇檔案」。", "warn")
         self.after(650, self.show_previous_update_result)
         self.after(1400, self.check_for_updates_async)
+        # 依授權快取的重驗週期連線；不在每次啟動時重複呼叫 API。
         self.after(2400, self.refresh_license_if_due_async)
 
     def apply_fonts(self):
@@ -1850,7 +1851,7 @@ class App(ctk.CTk):
         self.log("更新下載或驗證失敗，未變更現有程式。", "error")
         messagebox.showerror("更新失敗", "無法安全完成更新，現有版本未被修改。\n\n請稍後重試，或使用完整安裝包。", parent=self)
 
-    def refresh_license_if_due_async(self, *, force: bool = False, callback=None):
+    def refresh_license_if_due_async(self, *, force: bool = False, always_online: bool = False, callback=None):
         if LICENSE_MANAGER is None or getattr(LICENSE_MANAGER, "server_service", None) is None:
             if force:
                 messagebox.showerror("無法驗證", "線上授權服務尚未設定完成。", parent=self)
@@ -1864,7 +1865,7 @@ class App(ctk.CTk):
             due = service.offline_state().get("mode") == "grace"
         except Exception:
             due = True
-        if not force and not due:
+        if not force and not always_online and not due:
             return
 
         def worker():
@@ -2603,13 +2604,12 @@ class App(ctk.CTk):
 
     def install_notes_placeholder(self):
         text = (
-            "用法一｜整份腳本（推薦，類似剪映文檔匹配）：\n"
-            "【腳本】\n"
+            "用法一｜整份腳本：\n"
             "直接貼上完整口播逐字稿…\n\n"
             "用法二｜短詞庫：\n"
-            "痘痘藥\n"
-            "KoDoo TV\n"
-            "痘痘要 > 痘痘藥"
+            "葉黃素\n"
+            "玻尿酸\n"
+            "夜黃素 > 葉黃素"
         )
 
         def show():
@@ -2643,7 +2643,13 @@ class App(ctk.CTk):
             return
         self._notes_history_choices = {}
         values = []
-        entries = list(getattr(SUPPLEMENT_HISTORY_STORE, "entries", []) or [])
+        project_id, _series_id, _domain = _active_project_ids()
+        entries = list(
+            SUPPLEMENT_HISTORY_STORE.entries_for_project(project_id)
+            if SUPPLEMENT_HISTORY_STORE is not None
+            and hasattr(SUPPLEMENT_HISTORY_STORE, "entries_for_project")
+            else []
+        )
         for index, entry in enumerate(entries, 1):
             summary = " ".join(str(entry.get("text") or "").split())
             if len(summary) > 24:
@@ -2657,7 +2663,7 @@ class App(ctk.CTk):
             values.append(label)
             self._notes_history_choices[label] = entry
         if entries:
-            values.append("清除全部記憶")
+            values.append("清除目前專案記憶")
             display = "選擇記憶"
         else:
             values = ["尚無記憶"]
@@ -2666,11 +2672,12 @@ class App(ctk.CTk):
         self.notes_history_var.set(display)
 
     def on_notes_history_select(self, value: str):
-        if value == "清除全部記憶":
-            if messagebox.askyesno("清除補充資料記憶", "確定清除所有過去的補充資料記憶？", parent=self):
+        if value == "清除目前專案記憶":
+            project_id, _series_id, _domain = _active_project_ids()
+            if messagebox.askyesno("清除補充資料記憶", "確定清除目前專案的補充資料記憶？", parent=self):
                 try:
-                    SUPPLEMENT_HISTORY_STORE.clear()
-                    self.log("補充資料記憶已全部清除。", "success")
+                    SUPPLEMENT_HISTORY_STORE.clear(project_id)
+                    self.log("目前專案的補充資料記憶已清除。", "success")
                 except Exception as exc:
                     messagebox.showerror("清除失敗", str(exc), parent=self)
             self.refresh_notes_history_menu()
@@ -3331,36 +3338,6 @@ class App(ctk.CTk):
                 else:
                     messagebox.showerror("Key 無效", "請確認完整版 Key 是否輸入正確。", parent=win)
 
-        def migrate_legacy_key():
-            if LICENSE_MANAGER is None:
-                return
-            legacy_key = sup_key_var.get().strip()
-            if not legacy_key:
-                messagebox.showerror("缺少 Key", "請先貼上舊版 SW2 Key。", parent=win)
-                return
-            if not messagebox.askyesno(
-                "確認遷移舊版授權",
-                "這會將舊版 Key 傳送至 WiKiVibe License Server 驗證，並建立新版裝置授權。是否繼續？",
-                parent=win,
-            ):
-                return
-            result = LICENSE_MANAGER.migrate_legacy_key(legacy_key)
-            if not result:
-                messagebox.showerror("無法遷移", "舊版 Key 未通過遷移，或目前無法連線授權伺服器。", parent=win)
-                return
-            replacement_key = result.get("replacement_key") if isinstance(result, dict) else None
-            sup_key_var.set("")
-            lic_status_var.set(f"版本狀態：{license_status_summary()['label']}")
-            self.log("舊版授權已完成新版遷移。", "success")
-            if replacement_key:
-                messagebox.showinfo(
-                    "遷移成功：請立即保存新 Key",
-                    f"新版完整版 Key（只顯示這一次）：\n\n{replacement_key}\n\n請妥善保存。",
-                    parent=win,
-                )
-            else:
-                messagebox.showinfo("遷移成功", "舊版授權已完成新版遷移。", parent=win)
-
         def refresh_license_status():
             lic_status_var.set(f"版本狀態：{license_status_summary()['label']}")
 
@@ -3400,19 +3377,8 @@ class App(ctk.CTk):
             font=(FONT, 13, "bold"),
             command=apply_supporter_key,
         ).grid(row=2, column=1, sticky="e", padx=(0, 16), pady=(0, 12))
-        ctk.CTkButton(
-            supporter,
-            text="遷移舊版 SW2 Key",
-            width=150,
-            height=30,
-            corner_radius=12,
-            fg_color="#32333B",
-            hover_color="#45464F",
-            font=(FONT, 12),
-            command=migrate_legacy_key,
-        ).grid(row=3, column=1, sticky="e", padx=(0, 16), pady=(0, 12))
         license_actions = ctk.CTkFrame(supporter, fg_color="transparent")
-        license_actions.grid(row=3, column=0, sticky="w", padx=16, pady=(0, 12))
+        license_actions.grid(row=3, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 12))
         ctk.CTkButton(
             license_actions,
             text="重新驗證",
@@ -7856,82 +7822,410 @@ class App(ctk.CTk):
         anchor = parent or self
         win = ctk.CTkToplevel(anchor)
         win.title("選擇專案")
-        win.geometry("560x440")
+        win.geometry("580x500")
         win.configure(fg_color=BLACK_KITE)
         win.transient(anchor)
-        win.grab_set()
-        win.grid_columnconfigure(0, weight=1)
-        win.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(
-            win,
-            text="選擇這次要用的專案",
-            text_color=TEXT_ON_DARK,
-            font=(FONT, 18, "bold"),
-        ).grid(row=0, column=0, sticky="w", padx=20, pady=(16, 4))
-        ctk.CTkLabel(
-            win,
-            text="記憶個人化規則、固定用語、受訪者等，方便在不同專案間切換。",
-            text_color=MUTED_ON_DARK,
-            font=(FONT, 12),
-            wraplength=500,
-            justify="left",
-            anchor="w",
-        ).grid(row=0, column=0, sticky="w", padx=20, pady=(40, 8))
+        win.overrideredirect(True)
 
-        body = ctk.CTkScrollableFrame(win, fg_color=CARD_DARK)
-        body.grid(row=1, column=0, sticky="nsew", padx=20, pady=8)
+        def _release_project_grab():
+            try:
+                current = win.grab_current()
+                if current is not None:
+                    current.grab_release()
+            except Exception:
+                pass
+
+        def _restore_project_grab():
+            try:
+                if win.winfo_exists():
+                    win.lift()
+                    win.focus_force()
+            except Exception:
+                pass
+
+        def _close_window():
+            _release_project_grab()
+            try:
+                win.destroy()
+            finally:
+                try:
+                    anchor.after_idle(anchor.focus_force)
+                except Exception:
+                    pass
+
+        def _run_child_modal(callback):
+            _release_project_grab()
+            try:
+                return callback()
+            finally:
+                _restore_project_grab()
+
+        win.protocol("WM_DELETE_WINDOW", _close_window)
+        win.bind("<Escape>", lambda _event: _close_window())
+
+        shell = ctk.CTkFrame(
+            win, fg_color=BLACK_KITE, corner_radius=0,
+            border_width=1, border_color=LINE,
+        )
+        shell.pack(fill="both", expand=True)
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(2, weight=1)
+
+        title_bar = ctk.CTkFrame(shell, fg_color=DARK_2, corner_radius=0, height=42)
+        title_bar.grid(row=0, column=0, sticky="ew")
+        title_bar.grid_columnconfigure(0, weight=1)
+        title_label = ctk.CTkLabel(
+            title_bar, text="選擇專案", text_color=TEXT_ON_DARK,
+            font=(FONT, 14, "bold"), anchor="w",
+        )
+        title_label.grid(row=0, column=0, sticky="ew", padx=16, pady=8)
+        close_button = ctk.CTkButton(
+            title_bar, text="×", width=42, height=32, corner_radius=8,
+            fg_color="transparent", hover_color=GARNET,
+            text_color=TEXT_ON_DARK, font=(FONT, 20), command=_close_window,
+        )
+        close_button.grid(row=0, column=1, padx=5, pady=5)
+
+        move_state = {"x": 0, "y": 0}
+
+        def start_window_move(event):
+            move_state["x"] = event.x_root - win.winfo_x()
+            move_state["y"] = event.y_root - win.winfo_y()
+
+        def move_window(event):
+            win.geometry(
+                f"+{event.x_root - move_state['x']}+{event.y_root - move_state['y']}"
+            )
+
+        for widget in (title_bar, title_label):
+            widget.bind("<ButtonPress-1>", start_window_move)
+            widget.bind("<B1-Motion>", move_window)
+
+        heading = ctk.CTkFrame(shell, fg_color="transparent")
+        heading.grid(row=1, column=0, sticky="ew", padx=20, pady=(16, 8))
+        ctk.CTkLabel(
+            heading, text="選擇這次要用的專案",
+            text_color=TEXT_ON_DARK, font=(FONT, 18, "bold"), anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            heading,
+            text="可複選、拖曳排序；在專案上按右鍵可複製或刪除。",
+            text_color=MUTED_ON_DARK, font=(FONT, 12),
+            justify="left", anchor="w",
+        ).pack(fill="x", pady=(3, 0))
+
+        body = ctk.CTkFrame(shell, fg_color=CARD_DARK, corner_radius=12)
+        body.grid(row=2, column=0, sticky="nsew", padx=20, pady=8)
         body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        canvas = tk.Canvas(
+            body, bg=CARD_DARK, highlightthickness=0, bd=0,
+            selectborderwidth=0, cursor="arrow",
+        )
+        canvas.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        scrollbar = ctk.CTkScrollbar(body, command=canvas.yview, width=12)
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(4, 8), pady=8)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        selected_ids: set[str] = set()
+        row_bounds: list[tuple[str, float, float]] = []
+        drag_state = {
+            "kind": "", "start_x": 0.0, "start_y": 0.0,
+            "dragging": False, "target": None, "base": set(), "last_index": None,
+        }
+        row_height = 60
+        row_top = 8
+
+        def _rounded_points(x1: float, y1: float, x2: float, y2: float, radius: float = 12):
+            radius = max(2.0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
+            points = []
+            for cx, cy, start in (
+                (x2 - radius, y1 + radius, -90),
+                (x2 - radius, y2 - radius, 0),
+                (x1 + radius, y2 - radius, 90),
+                (x1 + radius, y1 + radius, 180),
+            ):
+                for offset in range(0, 91, 15):
+                    angle = math.radians(start + offset)
+                    points.extend((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+            return points
+
+        def _profile_ids() -> list[str]:
+            return [str(p.get("id") or "") for p in PROJECT_PROFILES.profiles]
+
+        def _row_index_at(y: float, x: float | None = None) -> int | None:
+            if x is not None:
+                width = max(canvas.winfo_width(), 460)
+                if x < 8 or x > width - 10:
+                    return None
+            for index, (_pid, top, bottom) in enumerate(row_bounds):
+                if top <= y <= bottom:
+                    return index
+            return None
+
+        def _draw_insert_indicator(target: int | None):
+            if target is None:
+                return
+            y = row_top + max(0, min(target, len(row_bounds))) * row_height - 2
+            width = max(canvas.winfo_width(), 420)
+            canvas.create_line(
+                16, y, width - 18, y, fill=ORANGE, width=4,
+                tags=("drag_indicator",),
+            )
 
         def render():
-            for child in body.winfo_children():
-                child.destroy()
+            old_view = canvas.yview()
+            canvas.delete("all")
+            row_bounds.clear()
             profiles = PROJECT_PROFILES.profiles
             if not profiles:
-                ctk.CTkLabel(
-                    body, text="尚無專案，請按下方「新增」。",
-                    text_color=MUTED_ON_DARK, font=(FONT, 13),
-                ).grid(row=0, column=0, sticky="w", padx=8, pady=12)
+                canvas.create_text(
+                    18, 24, text="尚無專案，請按下方「新增」。",
+                    fill=MUTED_ON_DARK, font=(FONT, 13), anchor="nw",
+                )
+                canvas.configure(scrollregion=(0, 0, 1, 70))
                 return
             active = PROJECT_PROFILES.active_id
+            width = max(canvas.winfo_width(), 460)
             for i, p in enumerate(profiles):
-                row = ctk.CTkFrame(body, fg_color=DARK_2, corner_radius=10)
-                row.grid(row=i, column=0, sticky="ew", padx=4, pady=4)
+                pid = str(p.get("id") or "")
+                top = row_top + i * row_height
+                bottom = top + 52
+                row_bounds.append((pid, top, bottom))
+                is_selected = pid in selected_ids
+                fill = "#46413F" if is_selected else DARK_2
+                outline = ORANGE if is_selected else fill
+                canvas.create_polygon(
+                    *_rounded_points(8, top, width - 10, bottom, 12),
+                    fill=fill, outline=outline, width=2 if is_selected else 1,
+                    smooth=True,
+                )
                 mark = "● " if p.get("id") == active else "○ "
-                ctk.CTkLabel(
-                    row,
-                    text=f"{mark}{p.get('name')}",
-                    text_color=TEXT_ON_DARK,
-                    font=(FONT, 14, "bold"),
-                    anchor="w",
-                ).pack(side="left", padx=12, pady=10)
-                ctk.CTkButton(
-                    row, text="選用", width=64, height=30, corner_radius=10,
-                    fg_color=ORANGE, hover_color=ORANGE_DARK,
-                    text_color="#FFFFFF", font=(FONT, 12, "bold"),
-                    command=lambda pid=p.get("id"): _activate(pid),
-                ).pack(side="right", padx=8)
+                canvas.create_text(
+                    24, top + 26, text=f"{mark}{p.get('name')}",
+                    fill=TEXT_ON_DARK, font=(FONT, 13), anchor="w",
+                )
+                canvas.create_polygon(
+                    *_rounded_points(width - 100, top + 10, width - 22, top + 42, 10),
+                    fill=ORANGE, outline=ORANGE, smooth=True,
+                )
+                canvas.create_text(
+                    width - 61, top + 26, text="選用",
+                    fill="#FFFFFF", font=(FONT, 10),
+                )
+            total_height = row_top * 2 + len(profiles) * row_height
+            canvas.configure(scrollregion=(0, 0, width, total_height))
+            if old_view and old_view[0] > 0:
+                canvas.yview_moveto(old_view[0])
 
         def _activate(pid):
             PROJECT_PROFILES.set_active(pid)
             PROJECT_PROFILES.save()
             self.refresh_project_label()
+            self.refresh_notes_history_menu()
             # 選完收成細長條
             self.set_project_bar_expanded(False)
-            win.destroy()
+            _close_window()
+
+        def _delete_selected(_event=None):
+            ids = [pid for pid in _profile_ids() if pid in selected_ids]
+            if not ids:
+                return
+            names = [
+                str(p.get("name") or "未命名專案")
+                for p in PROJECT_PROFILES.profiles if str(p.get("id") or "") in selected_ids
+            ]
+            preview = "\n".join(f"• {name}" for name in names[:8])
+            if len(names) > 8:
+                preview += f"\n• 另有 {len(names) - 8} 個專案"
+            confirmed = _run_child_modal(lambda: messagebox.askyesno(
+                "確認刪除專案",
+                f"確定要刪除以下 {len(names)} 個專案嗎？\n\n{preview}\n\n此動作無法復原。",
+                parent=win,
+            ))
+            if not confirmed:
+                return
+            for pid in ids:
+                PROJECT_PROFILES.remove(pid)
+            PROJECT_PROFILES.save()
+            selected_ids.clear()
+            self.refresh_project_label()
+            self.refresh_notes_history_menu()
+            render()
+
+        def _duplicate_selected():
+            ids = [pid for pid in _profile_ids() if pid in selected_ids]
+            if not ids:
+                return
+            copies = PROJECT_PROFILES.duplicate(ids)
+            PROJECT_PROFILES.save()
+            selected_ids.clear()
+            selected_ids.update(str(p.get("id") or "") for p in copies)
+            render()
+
+        context_menu = tk.Menu(
+            win, tearoff=0, bg=DARK_2, fg=TEXT_ON_DARK,
+            activebackground=ORANGE, activeforeground="#FFFFFF",
+            relief="flat", bd=0, font=(FONT, 11),
+        )
+        context_menu.add_command(label="複製", command=_duplicate_selected)
+        context_menu.add_separator()
+        context_menu.add_command(label="刪除…", command=_delete_selected)
+
+        def on_right_click(event):
+            y = canvas.canvasy(event.y)
+            x = canvas.canvasx(event.x)
+            index = _row_index_at(y, x)
+            if index is not None:
+                pid = row_bounds[index][0]
+                if pid not in selected_ids:
+                    selected_ids.clear()
+                    selected_ids.add(pid)
+                    render()
+            if not selected_ids:
+                return
+            _release_project_grab()
+            try:
+                context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                try:
+                    context_menu.grab_release()
+                except Exception:
+                    pass
+                _restore_project_grab()
+
+        def on_left_press(event):
+            y = canvas.canvasy(event.y)
+            x = canvas.canvasx(event.x)
+            index = _row_index_at(y, x)
+            ctrl = bool(event.state & 0x0004)
+            shift = bool(event.state & 0x0001)
+            drag_state.update({
+                "start_x": x, "start_y": y, "dragging": False,
+                "target": None, "base": set(selected_ids), "last_index": index,
+            })
+            if index is None:
+                drag_state["kind"] = "marquee"
+                if not ctrl:
+                    selected_ids.clear()
+                drag_state["base"] = set(selected_ids)
+                render()
+                return
+            pid = row_bounds[index][0]
+            width = max(canvas.winfo_width(), 460)
+            if x >= width - 112:
+                _activate(pid)
+                return
+            drag_state["kind"] = "row"
+            if shift and drag_state.get("last_index") is not None and selected_ids:
+                selected_indices = [
+                    i for i, item_id in enumerate(_profile_ids()) if item_id in selected_ids
+                ]
+                anchor_index = selected_indices[-1] if selected_indices else index
+                lo, hi = sorted((anchor_index, index))
+                selected_ids.update(_profile_ids()[lo:hi + 1])
+            elif ctrl:
+                if pid in selected_ids:
+                    selected_ids.remove(pid)
+                else:
+                    selected_ids.add(pid)
+            elif pid not in selected_ids:
+                selected_ids.clear()
+                selected_ids.add(pid)
+            render()
+
+        def on_left_motion(event):
+            if not drag_state["kind"]:
+                return
+            y = canvas.canvasy(event.y)
+            x = canvas.canvasx(event.x)
+            if event.y < 22:
+                canvas.yview_scroll(-1, "units")
+                y = canvas.canvasy(event.y)
+            elif event.y > canvas.winfo_height() - 22:
+                canvas.yview_scroll(1, "units")
+                y = canvas.canvasy(event.y)
+            if drag_state["kind"] == "row":
+                if abs(y - drag_state["start_y"]) < 5:
+                    return
+                drag_state["dragging"] = True
+                target = int((y - row_top + row_height / 2) // row_height)
+                drag_state["target"] = max(0, min(target, len(row_bounds)))
+                render()
+                _draw_insert_indicator(drag_state["target"])
+                return
+            drag_state["dragging"] = True
+            x1, x2 = sorted((drag_state["start_x"], x))
+            y1, y2 = sorted((drag_state["start_y"], y))
+            selected_ids.clear()
+            selected_ids.update(drag_state["base"])
+            if x2 >= 8 and x1 <= max(canvas.winfo_width(), 460) - 10:
+                for pid, top, bottom in row_bounds:
+                    if y2 >= top and y1 <= bottom:
+                        selected_ids.add(pid)
+            render()
+            canvas.create_rectangle(
+                x1, y1, x2, y2, outline=ORANGE, width=1,
+                dash=(4, 3), tags=("selection_marquee",),
+            )
+
+        def on_left_release(_event):
+            if drag_state["kind"] == "row" and drag_state["dragging"]:
+                target = drag_state.get("target")
+                if target is not None and PROJECT_PROFILES.reorder(selected_ids, target):
+                    PROJECT_PROFILES.save()
+            drag_state.update({"kind": "", "dragging": False, "target": None})
+            render()
+
+        def on_double_click(event):
+            """雙擊專案列即可直接切換，不必精準點選右側按鈕。"""
+            if event.state & 0x0004 or event.state & 0x0001:
+                return
+            y = canvas.canvasy(event.y)
+            x = canvas.canvasx(event.x)
+            index = _row_index_at(y, x)
+            if index is not None:
+                _activate(row_bounds[index][0])
+
+        def select_all(_event=None):
+            selected_ids.clear()
+            selected_ids.update(_profile_ids())
+            render()
+            return "break"
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        canvas.bind("<ButtonPress-1>", on_left_press)
+        canvas.bind("<B1-Motion>", on_left_motion)
+        canvas.bind("<ButtonRelease-1>", on_left_release)
+        canvas.bind("<Double-Button-1>", on_double_click)
+        canvas.bind("<Button-3>", on_right_click)
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        canvas.bind("<Control-a>", select_all)
+        canvas.bind("<Delete>", _delete_selected)
+        canvas.bind("<Configure>", lambda _event: render())
+        canvas.configure(takefocus=True)
 
         def add_profile():
-            name = simple_prompt(win, "專案名稱（例如節目名）")
+            name = _run_child_modal(
+                lambda: simple_prompt(win, "專案名稱")
+            )
             if not name:
                 return
-            guests = simple_prompt(win, "固定用語／受訪者（可空白）") or ""
+            guests = _run_child_modal(
+                lambda: simple_prompt(win, "固定用語／受訪者（可空白）")
+            ) or ""
             profile = PROJECT_PROFILES.upsert(
                 name=name, series_name=name, domain="通用", guests=guests, terms=guests,
             )
             PROJECT_PROFILES.set_active(profile.get("id") or "")
             PROJECT_PROFILES.save()
             self.refresh_project_label()
+            self.refresh_notes_history_menu()
             self.set_project_bar_expanded(False)
-            win.destroy()
+            _close_window()
 
         def _clear():
             PROJECT_PROFILES.set_active("")
@@ -7941,8 +8235,8 @@ class App(ctk.CTk):
             self.set_project_bar_expanded(True)
             render()
 
-        foot = ctk.CTkFrame(win, fg_color="transparent")
-        foot.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 16))
+        foot = ctk.CTkFrame(shell, fg_color="transparent")
+        foot.grid(row=3, column=0, sticky="ew", padx=20, pady=(4, 16))
         ctk.CTkButton(
             foot, text="新增", width=90, height=36, corner_radius=12,
             fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="#FFFFFF",
@@ -7956,9 +8250,13 @@ class App(ctk.CTk):
         ctk.CTkButton(
             foot, text="關閉", width=90, height=36, corner_radius=12,
             fg_color="#32333B", hover_color="#45464F", text_color=TEXT_ON_DARK,
-            font=(FONT, 13, "bold"), command=win.destroy,
+            font=(FONT, 13, "bold"), command=_close_window,
         ).pack(side="right")
         render()
+        win.update_idletasks()
+        x = anchor.winfo_rootx() + max(0, (anchor.winfo_width() - win.winfo_width()) // 2)
+        y = anchor.winfo_rooty() + max(0, (anchor.winfo_height() - win.winfo_height()) // 2)
+        win.geometry(f"+{x}+{y}")
 
 
 def simple_prompt(parent, title: str, default: str = "") -> str | None:

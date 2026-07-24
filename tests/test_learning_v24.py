@@ -40,9 +40,9 @@ class LearningFeedbackTests(unittest.TestCase):
             ):
                 store.record(
                     action=action,
-                    original_text="萬歌來了",
-                    ai_text="萬哥來了",
-                    final_text="萬哥來了" if action != LEARNING.ACTION_RESTORE_ORIGINAL else "萬歌來了",
+                    original_text="范例內容",
+                    ai_text="範例內容",
+                    final_text="範例內容" if action != LEARNING.ACTION_RESTORE_ORIGINAL else "范例內容",
                     input_path=r"D:\secret\episode01.mp4",
                     app_version="2.4.6",
                     source="quick_compare",
@@ -62,9 +62,9 @@ class LearningFeedbackTests(unittest.TestCase):
             events.append({
                 "event_id": f"e{i}",
                 "action": LEARNING.ACTION_MANUAL_EDIT,
-                "original_text": "萬歌說",
-                "ai_text": "萬歌說",
-                "final_text": "萬哥說",
+                "original_text": "范例文字",
+                "ai_text": "范例文字",
+                "final_text": "範例文字",
                 "domain": "訪談",
                 "series_id": "show1",
                 "input_name": f"ep{i}.srt",
@@ -80,9 +80,9 @@ class LearningFeedbackTests(unittest.TestCase):
         self.assertGreaterEqual(len(two), 1)
         self.assertGreaterEqual(two[0]["positive"], 2)
         self.assertNotEqual(two[0]["before"], two[0]["after"])
-        # 應包含 萬歌→萬哥 或抽取後的短替換
+        # 應包含 范例→範例 或抽取後的短替換
         pair_ok = any(
-            (c["before"] in ("萬歌", "歌") and c["after"] in ("萬哥", "哥"))
+            (c["before"] in ("范例", "范") and c["after"] in ("範例", "範"))
             for c in two
         )
         self.assertTrue(pair_ok, msg=str(two))
@@ -117,7 +117,7 @@ class RuleSchemaV2Tests(unittest.TestCase):
             path = Path(tmp) / "personal_rules.json"
             # 模擬 v1 檔
             path.write_text(
-                '{"version":1,"rules":[{"before":"萬歌","after":"萬哥","domain":"訪談","adopted_count":3,"enabled":true}]}',
+                '{"version":1,"rules":[{"before":"范例","after":"範例","domain":"訪談","adopted_count":3,"enabled":true}]}',
                 encoding="utf-8",
             )
             store = RULES.RuleStore(path)
@@ -135,15 +135,15 @@ class RuleSchemaV2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rules.json"
             store = RULES.RuleStore(path)
-            store.add("萬歌", "萬哥", project_id="proj_a")
-            store.add("萬歌", "王哥", project_id="proj_b")
+            store.add("范例", "範例", project_id="proj_a")
+            store.add("范例", "示例", project_id="proj_b")
             store.save()
             a = RULES.select_rules_for_prompt(store, project_id="proj_a")
             b = RULES.select_rules_for_prompt(store, project_id="proj_b")
             self.assertEqual(len(a), 1)
-            self.assertEqual(a[0]["after"], "萬哥")
+            self.assertEqual(a[0]["after"], "範例")
             self.assertEqual(len(b), 1)
-            self.assertEqual(b[0]["after"], "王哥")
+            self.assertEqual(b[0]["after"], "示例")
             self.assertEqual(len(store.by_project("proj_a")), 1)
             self.assertEqual(len(store.by_project("proj_b")), 1)
 
@@ -151,9 +151,9 @@ class RuleSchemaV2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rules.json"
             store = RULES.RuleStore(path)
-            rule = store.add("萬歌", "萬哥", domain="訪談", source="manual", project_id="p1")
-            RULES.track_rule_adoption(store, "萬歌來了", "萬哥來了", rules_used=[rule], persist=True)
-            reloaded = RULES.RuleStore(path).find("萬歌", "萬哥", project_id="p1")
+            rule = store.add("范例", "範例", domain="訪談", source="manual", project_id="p1")
+            RULES.track_rule_adoption(store, "范例內容", "範例內容", rules_used=[rule], persist=True)
+            reloaded = RULES.RuleStore(path).find("范例", "範例", project_id="p1")
             self.assertEqual(reloaded["model_follow_count"], 1)
             self.assertEqual(reloaded["human_accept_count"], 0)
 
@@ -207,11 +207,39 @@ class ProjectProfileTests(unittest.TestCase):
             env = {"APPDATA": str(Path(tmp) / "roaming"), "LOCALAPPDATA": str(Path(tmp) / "local")}
             with mock.patch.dict(os.environ, env, clear=False):
                 store = LEARNING.ProjectProfileStore(Path(tmp) / "profiles.json")
-                store.upsert(name="萬哥來了", series_name="Podcast", domain="訪談", guests="萬哥")
+                store.upsert(name="範例節目", series_name="Podcast", domain="訪談", guests="測試來賓")
                 store.save()
                 ctx = store.context_for_prompt()
-                self.assertIn("萬哥來了", ctx)
+                self.assertIn("範例節目", ctx)
                 self.assertIn("訪談", ctx)
+
+    def test_duplicate_remove_and_reorder_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "profiles.json"
+            store = LEARNING.ProjectProfileStore(path)
+            first = store.upsert(name="甲專案", guests="甲來賓", terms="甲用語")
+            second = store.upsert(name="乙專案")
+            third = store.upsert(name="丙專案")
+
+            copies = store.duplicate([first["id"], second["id"]])
+            self.assertEqual([p["name"] for p in copies], ["甲專案 副本", "乙專案 副本"])
+            self.assertEqual(copies[0]["guests"], "甲來賓")
+            self.assertEqual(copies[0]["terms"], "甲用語")
+            self.assertNotEqual(copies[0]["id"], first["id"])
+
+            selected_ids = [first["id"], copies[0]["id"]]
+            self.assertTrue(store.reorder(selected_ids, len(store.profiles)))
+            self.assertEqual([p["id"] for p in store.profiles[-2:]], selected_ids)
+
+            store.set_active(second["id"])
+            self.assertTrue(store.remove(second["id"]))
+            self.assertNotEqual(store.active_id, second["id"])
+            store.save()
+            reopened = LEARNING.ProjectProfileStore(path)
+            self.assertEqual(
+                [p["name"] for p in reopened.profiles],
+                ["乙專案 副本", "丙專案", "甲專案", "甲專案 副本"],
+            )
 
 
 class SupplementHistoryTests(unittest.TestCase):
@@ -224,12 +252,36 @@ class SupplementHistoryTests(unittest.TestCase):
             self.assertTrue(store.remember("第一份補充資料", project_id="p3", project_name="專案三"))
 
             reloaded = LEARNING.SupplementHistoryStore(path)
-            self.assertEqual(len(reloaded.entries), 2)
+            self.assertEqual(len(reloaded.entries), 3)
             self.assertEqual(reloaded.entries[0]["text"], "第一份補充資料")
             self.assertEqual(reloaded.entries[0]["project_name"], "專案三")
 
             reloaded.clear()
             self.assertEqual(LEARNING.SupplementHistoryStore(path).entries, [])
+
+    def test_history_isolated_per_project_and_capped_at_ten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "supplement_history.json"
+            store = LEARNING.SupplementHistoryStore(path)
+            for index in range(12):
+                store.remember(f"1111-{index}", project_id="p1111", project_name="1111")
+            for index in range(2):
+                store.remember(f"2222-{index}", project_id="p2222", project_name="2222")
+            # 相同文字在不同專案仍可各自保存。
+            store.remember("共用詞", project_id="p1111", project_name="1111")
+            store.remember("共用詞", project_id="p2222", project_name="2222")
+
+            first = store.entries_for_project("p1111")
+            second = store.entries_for_project("p2222")
+            self.assertEqual(len(first), 10)
+            self.assertEqual(len(second), 3)
+            self.assertIn("1111-11", [entry["text"] for entry in first])
+            self.assertNotIn("1111-0", [entry["text"] for entry in first])
+            self.assertEqual(store.entries_for_project("p3333"), [])
+
+            store.clear("p1111")
+            self.assertEqual(store.entries_for_project("p1111"), [])
+            self.assertEqual(len(store.entries_for_project("p2222")), 3)
 
 
 if __name__ == "__main__":

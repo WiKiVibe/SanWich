@@ -61,20 +61,20 @@ class SubtitleLogicTests(unittest.TestCase):
         self.assertEqual(meta["low_score"], 0)
 
     def test_arrow_context_replacement_is_deterministic(self):
-        replacements = CORE.replacements_from_context("痘痘要 > 痘痘藥")
+        replacements = CORE.replacements_from_context("夜黃素 > 葉黃素")
         self.assertEqual(
-            CORE.apply_context_replacements("痘痘要很好用", replacements),
-            "痘痘藥很好用",
+            CORE.apply_context_replacements("夜黃素很好用", replacements),
+            "葉黃素很好用",
         )
 
     def test_semantic_boundaries_follow_chinese_phrase_structure(self):
         cases = {
-            "傳說中見神殺神見佛殺佛的萬哥出現了": ["傳說中見神殺神", "見佛殺佛的萬哥出現了"],
-            "因為今天為什麼是萬哥來呢因為我們的那個綺夢小妹她去外景": [
-                "因為今天為什麼是萬哥來呢",
-                "因為我們的那個綺夢小妹她去外景",
+            "傳說中見神殺神見佛殺佛的主持人出現了": ["傳說中見神殺神", "見佛殺佛的主持人出現了"],
+            "因為今天為什麼是主持人來呢因為我們的那個節目助理去外景": [
+                "因為今天為什麼是主持人來呢",
+                "因為我們的那個節目助理去外景",
             ],
-            "而且我覺得萬哥很適合來聊 podcast": ["而且我覺得", "萬哥很適合來聊podcast"],
+            "而且我覺得主持人很適合來聊 podcast": ["而且我覺得", "主持人很適合來聊podcast"],
             "那回去就是靠一些肌肉記憶慢慢把事情都撈回來": [
                 "那回去就是靠一些肌肉記憶",
                 "慢慢把事情都撈回來",

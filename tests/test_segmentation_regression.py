@@ -24,7 +24,7 @@ CORE = load_core()
 class SegmentationRegressionTests(unittest.TestCase):
     def test_clause_taking_verb_is_not_preferred_boundary(self):
         conditional_cost = CORE._boundary_linguistic_cost("如果你真的覺得", "這件事", "v", "n")
-        parenthetical_cost = CORE._boundary_linguistic_cost("而且我覺得", "萬哥", "v", "n")
+        parenthetical_cost = CORE._boundary_linguistic_cost("而且我覺得", "來賓", "v", "n")
         self.assertGreater(conditional_cost, 0)
         self.assertLess(parenthetical_cost, 0)
 

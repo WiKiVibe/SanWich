@@ -130,7 +130,7 @@ def redact_path(path: str | Path | None) -> str:
 class SupplementHistoryStore:
     """補充資料的本機最近使用紀錄；不保存媒體路徑。"""
 
-    MAX_ENTRIES = 20
+    MAX_ENTRIES = 10
 
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path is not None else supplement_history_path()
@@ -145,7 +145,8 @@ class SupplementHistoryStore:
             return None
         return {
             "text": text[:8000],
-            "project_id": _safe_str(item.get("project_id"), 120),
+            # 舊資料沒有 project_id 時歸入預設專案，不讓它出現在其他專案。
+            "project_id": _safe_str(item.get("project_id"), 120) or "_default",
             "project_name": _safe_str(item.get("project_name"), 80) or "預設",
             "updated_at": str(item.get("updated_at") or _iso_now()),
         }
@@ -162,7 +163,19 @@ class SupplementHistoryStore:
                 clean = self._sanitise(item)
                 if clean is not None:
                     entries.append(clean)
-        self.entries = entries[: self.MAX_ENTRIES]
+        self.entries = self._limit_per_project(entries)
+
+    @classmethod
+    def _limit_per_project(cls, entries: list[dict]) -> list[dict]:
+        counts: dict[str, int] = {}
+        kept: list[dict] = []
+        for entry in entries:
+            project_id = str(entry.get("project_id") or "_default")
+            if counts.get(project_id, 0) >= cls.MAX_ENTRIES:
+                continue
+            counts[project_id] = counts.get(project_id, 0) + 1
+            kept.append(entry)
+        return kept
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,14 +196,34 @@ class SupplementHistoryStore:
         })
         if entry is None:
             return False
-        self.entries = [row for row in self.entries if row.get("text") != clean_text]
+        project_id_clean = str(entry.get("project_id") or "_default")
+        self.entries = [
+            row for row in self.entries
+            if not (
+                row.get("text") == clean_text
+                and str(row.get("project_id") or "_default") == project_id_clean
+            )
+        ]
         self.entries.insert(0, entry)
-        self.entries = self.entries[: self.MAX_ENTRIES]
+        self.entries = self._limit_per_project(self.entries)
         self.save()
         return True
 
-    def clear(self) -> None:
-        self.entries = []
+    def entries_for_project(self, project_id: str = "") -> list[dict]:
+        """只回傳指定專案的補充資料記憶。"""
+        pid = _safe_str(project_id, 120) or "_default"
+        return [entry for entry in self.entries if str(entry.get("project_id") or "_default") == pid]
+
+    def clear(self, project_id: str | None = None) -> None:
+        """清除指定專案記憶；未指定時保留維護用的清除全部功能。"""
+        if project_id is None:
+            self.entries = []
+        else:
+            pid = _safe_str(project_id, 120) or "_default"
+            self.entries = [
+                entry for entry in self.entries
+                if str(entry.get("project_id") or "_default") != pid
+            ]
         self.save()
 
 
@@ -514,6 +547,61 @@ class ProjectProfileStore:
         if self._data.get("active_id") == profile_id:
             self._data["active_id"] = self._data["profiles"][0]["id"] if self._data["profiles"] else ""
         return len(self._data["profiles"]) != before
+
+    def duplicate(self, profile_ids: Iterable[str]) -> list[dict]:
+        """複製指定專案，副本接在原專案後面並使用不重複名稱。"""
+        wanted = {str(profile_id or "") for profile_id in profile_ids}
+        existing_names = {str(p.get("name") or "") for p in self._data["profiles"]}
+        copied: list[dict] = []
+        new_profiles: list[dict] = []
+        now = _iso_now()
+
+        def copy_name(source_name: str) -> str:
+            base = _safe_str(source_name, 80) or "未命名專案"
+            suffix = " 副本"
+            candidate = f"{base[:80 - len(suffix)]}{suffix}"
+            number = 2
+            while candidate in existing_names:
+                suffix = f" 副本 {number}"
+                candidate = f"{base[:80 - len(suffix)]}{suffix}"
+                number += 1
+            existing_names.add(candidate)
+            return candidate
+
+        for profile in self._data["profiles"]:
+            new_profiles.append(profile)
+            if str(profile.get("id") or "") not in wanted:
+                continue
+            clone = dict(profile)
+            clone.update({
+                "id": str(uuid.uuid4()),
+                "name": copy_name(str(profile.get("name") or "")),
+                "created_at": now,
+                "updated_at": now,
+            })
+            clone = self._sanitise(clone)
+            new_profiles.append(clone)
+            copied.append(clone)
+        self._data["profiles"] = new_profiles
+        return copied
+
+    def reorder(self, profile_ids: Iterable[str], target_index: int) -> bool:
+        """把指定專案群組移到原清單的插入位置，保留群組內原本順序。"""
+        selected = {str(profile_id or "") for profile_id in profile_ids}
+        profiles = self._data["profiles"]
+        moving = [p for p in profiles if str(p.get("id") or "") in selected]
+        if not moving:
+            return False
+        target = max(0, min(int(target_index), len(profiles)))
+        target -= sum(
+            1 for index, profile in enumerate(profiles[:target])
+            if str(profile.get("id") or "") in selected
+        )
+        remaining = [p for p in profiles if str(p.get("id") or "") not in selected]
+        reordered = remaining[:target] + moving + remaining[target:]
+        changed = [p.get("id") for p in reordered] != [p.get("id") for p in profiles]
+        self._data["profiles"] = reordered
+        return changed
 
     def context_for_prompt(self) -> str:
         active = self.get_active()

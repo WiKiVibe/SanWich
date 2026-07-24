@@ -40,8 +40,8 @@ datas = [
     ('scripts/update/apply_update.ps1', '.'),
 ]
 
-# 只保留真的存在的檔案，避免打包失敗
-datas = [(src, dst) for src, dst in datas if (ROOT / src).exists()]
+# 只保留真的存在的檔案，並轉成絕對路徑，避免 PyInstaller 以 spec 目錄解析。
+datas = [(str(ROOT / src), dst) for src, dst in datas if (ROOT / src).exists()]
 
 hiddenimports = [
     'customtkinter',

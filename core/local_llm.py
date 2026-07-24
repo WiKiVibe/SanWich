@@ -26,7 +26,7 @@ from pathlib import Path
 
 MODEL_ID = "YC-Chen/Breeze-7B-Instruct-v1_0-GGUF"
 MODEL_FILENAME = "breeze-7b-instruct-v1_0-q4_k_m.gguf"
-MODEL_LABEL = "Breeze-7B-Instruct v1.0（本機 Q4_K_M）"
+MODEL_LABEL = "Breeze-7B-Instruct v1.0 (Local Q4_K_M)"
 MODEL_URL = f"https://huggingface.co/{MODEL_ID}/resolve/main/{MODEL_FILENAME}?download=true"
 MODEL_SIZE = 4_538_717_088
 MODEL_SHA256 = "151a564e14fe47d18e3bf1a6dd2fe3e687cdc386fb3083471522e512131a72ec"

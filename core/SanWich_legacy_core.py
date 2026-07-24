@@ -206,7 +206,7 @@ def load_config() -> dict:
             return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {"api_provider": "local", "api_key": "", "model": "Breeze-7B-Instruct v1.0（本機 Q4_K_M）", "use_llm": False, "use_text_fix": False, "output_srt_enabled": True, "output_txt_enabled": True}
+    return {"api_provider": "local", "api_key": "", "model": "Breeze-7B-Instruct v1.0 (Local Q4_K_M)", "use_llm": False, "use_text_fix": False, "output_srt_enabled": True, "output_txt_enabled": True}
 
 def save_config(cfg: dict):
     try:
@@ -1329,7 +1329,7 @@ def required_phrases_from_context(context_notes: str) -> list[str]:
         line = _strip_context_line(raw_line)
         if not line or _CONTEXT_ARROW_RE.match(line):
             continue
-        # 去掉前後括註說明：KoDoo TV（頻道名）
+        # 去掉前後括註說明：示範頻道（頻道名）
         line = re.sub(r"[（(][^）)]*[）)]\s*$", "", line).strip()
         if not line or len(line) > 80:
             continue
@@ -2676,7 +2676,7 @@ class DualASRApp(BaseTk):
                  font=(FONT_FAMILY, 10, "bold")).pack(side="left")
         tk.Label(ctx_panel,
                  text="輸入大綱、人名、地名、公司名、專有名詞等，AI校對時會優先以此為準\n"
-                      "範例：受訪者｜黃先生（老黃）  地點｜北投士林科技園區  術語｜生成式AI、RAG、向量資料庫",
+                      "範例：受訪者｜測試來賓  地點｜示範場地  術語｜生成式AI、RAG、向量資料庫",
                  justify="left",
                  bg=PANEL, fg=MUTED, font=(FONT_FAMILY, 9)).pack(anchor="w", pady=(0, 8))
         ctx_text_frame = tk.Frame(ctx_panel, bg=PANEL)

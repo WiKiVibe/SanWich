@@ -69,6 +69,13 @@ SUPPORTER_PLAN.md
 聲文去SanWich_工作計畫.md
 安裝包製作_踩雷與解法.md
 SanWich_分析報告*.md
+/LICENSE_ANALYSIS.md
+/LICENSE_API_SPEC.md
+/LICENSE_MIGRATION_PLAN.md
+/WORKERS_FULL_LICENSE_PLAN.md
+/本次修改對照_*.md
+docs/開發計畫_*.md
+scripts/release/
 CLEANUP_BACKUPS.bat
 CLEANUP_BACKUPS.ps1
 assets/source/

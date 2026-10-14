@@ -76,7 +76,7 @@ SanWich 為 Windows 原生桌面軟體，處理速度取決於本機硬體配置
 > SanWich V3 目前處於公開測試準備階段。主程式與 AI 運算環境分開存放，更新主程式時無需反覆下載大型運算環境。
 
 ### 1. 取得安裝檔案
-請至 [WiKiVibe 官網](https://wikivibe.win/) 下載 SanWich。
+請至 [WiKiVibe 官網](https://wikivibe.win/?app=sanwich) 下載 SanWich。
 
 ### 2. 解壓縮與初次設定
 1. 將 `SanWich_v3.0.0-beta.5_App_Lightweight.zip` 解壓縮到可寫入的資料夾，開啟其中 `SanWich` 資料夾內的 `SanWich.exe`。

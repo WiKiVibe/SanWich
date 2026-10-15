@@ -138,7 +138,7 @@ SanWich 提供 Free、PLUS 與 PRO 三種方案：
 
 ## 授權與使用條款
 
-SanWich 為專有軟體（非開源），提供免費與付費方案，使用即表示同意 [使用條款](docs/EULA.md)。本 Repo 提供安裝檔、說明文件與問題回報管道。第三方元件授權請參閱 [第三方元件聲明](docs/THIRD_PARTY_NOTICES.md)。
+SanWich 為專有軟體（非開源），提供免費與付費方案。[使用條款](docs/EULA.md) 目前為草稿，正式版公布前，服務相關規範以 [WiKiVibe 官網](https://wikivibe.win/) 公布的內容為準。本 Repo 提供安裝檔、說明文件與問題回報管道。第三方元件授權請參閱 [第三方元件聲明](docs/THIRD_PARTY_NOTICES.md)。
 
 ---
 

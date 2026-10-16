@@ -127,7 +127,7 @@ SanWich 提供 Free、PLUS 與 PRO 三種方案：
 
 ## 問題回報與交流
 
-問題回報與功能建議，請寄信至 [service@wikivibe.studio](mailto:service@wikivibe.studio)。  
+問題回報與功能建議，請寄信至 [service@wikivibe.win](mailto:service@wikivibe.win)。  
 為加快排查速度，回報時請附上：
 1. **環境資訊**：SanWich 版本、Windows 版本、顯示卡型號（如 RTX 4070 12GB）。
 2. **操作流程**：發生問題前的詳細操作步驟。

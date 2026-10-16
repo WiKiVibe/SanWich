@@ -57,4 +57,4 @@
 
 ## 10. 條款變更與聯絡方式
 
-WiKiVibe 得修訂本條款，修訂後的版本將公布於官網或本軟體的發行說明。如有疑問，請來信 [service@wikivibe.studio](mailto:service@wikivibe.studio)。
+WiKiVibe 得修訂本條款，修訂後的版本將公布於官網或本軟體的發行說明。如有疑問，請來信 [service@wikivibe.win](mailto:service@wikivibe.win)。

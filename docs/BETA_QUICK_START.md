@@ -42,7 +42,7 @@
 
 ## 回報問題
 
-請寄信至 [service@wikivibe.studio](mailto:service@wikivibe.studio)，並盡量附上：
+請寄信至 [service@wikivibe.win](mailto:service@wikivibe.win)，並盡量附上：
 
 - SanWich 版本、Windows 版本與顯示卡型號。
 - 使用的功能，以及發生問題前的操作步驟。

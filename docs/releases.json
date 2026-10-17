@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "product": "SanWich",
+  "updated": "2026-10-18",
+  "releases": [
+    {
+      "version": "3.0.0-beta.7",
+      "tag": "v3.0.0-beta.7",
+      "date": "2026-10-18",
+      "prerelease": true,
+      "build_id": "20261018-0408-2a4776d",
+      "notes_zh": [
+        "新增「自動檢查更新」：程式開啟後會自動檢查新版，有新版時只提示，按「立即更新」才會下載並更新，不會再問第二次；也可以選「稍後」或「略過此版」。",
+        "更新更快：只替換有變動的檔案，一般約一分鐘即可完成。（從 beta.7 升級到之後的版本才有這個效果。）",
+        "更新更清楚：按下更新前會先說明大約需要多久，更新期間重複開啟程式會被擋下並提示；更新失敗時會顯示具體原因，並自動重新開啟原版本。",
+        "更新時會顯示「SanWich 正在更新」小視窗，不用再對著空白畫面等。（從 beta.7 升級到之後的版本才會看到。）",
+        "範圍聽寫：入點和出點可以用下拉選單直接選時、分、秒。",
+        "範圍轉寫完成後，編輯器會播放剛剛轉寫的那一段；之後重新開啟草稿也正常。",
+        "原片改名後，不會再連到錯的檔案，會跳出「找不到原片」提醒你重新指定。",
+        "修正波形還在計算時切換片段，程式會閃退的問題。",
+        "執行紀錄更完整，回報問題時能確認 AI 和顯示卡有沒有啟用。",
+        "版本與授權畫面更簡潔：只顯示訂閱到期日，驗證時間資訊改成滑鼠停留提示。",
+        "PLUS 重新驗證的間隔從 1 天延長為 3 天。",
+        "J、K、L 控制播放：J 倒轉、L 快轉，連按會加速，快轉最快 8 倍，倒轉最快 4 倍；K 暫停。倒轉時畫面和聲音會一起倒放，時間軸也會跟著走。",
+        "只用鍵盤也能改字幕：上下鍵會依序跳到每句字幕的開頭和結尾，並選取那一句；按 Enter 開始改字，再按一次確認；要在同一句裡換行按 Ctrl+Enter。",
+        "選取字幕裡的文字後按 Ctrl+H，會直接打開「尋找與取代」，並且已經填好選取的字。",
+        "YouTube 下載更穩：暫時被擋時會自動重試；只下載你選的片段，不用整支下載；進度條從 0% 一路走到 100%，不會中途重來。",
+        "只有聲音、沒有畫面的檔案，字幕結尾也會自動稍微延長，相鄰的字幕也會自動接起來。",
+        "修正偶爾誤報「無法寫入 SanWich 資料夾」的問題。",
+        "開啟畫面重新排版。",
+        "客服信箱改為 service@wikivibe.win。"
+      ],
+      "upgrade_notes_zh": [
+        "從 beta.5 升級：到「版本與授權」按「套用更新檔」，選擇 SanWich_Update_v3.0.0-beta.7.zip。",
+        "這次升級仍用舊的更新方式，需要數分鐘，期間請不要重新開啟程式。",
+        "AI 運算環境沿用 v3，不需要重新下載。"
+      ],
+      "known_issues_zh": [
+        "程式尚未購買程式碼簽章憑證，第一次開啟時 Windows 會出現「Windows 已保護您的電腦」，處理方式見快速上手指南。"
+      ],
+      "requires_engine": "SanWich_AI_Engine_CUDA12_v3.zip",
+      "assets": [
+        {
+          "name": "SanWich_AI_Engine_CUDA12_v3.zip",
+          "role": "engine",
+          "size": 3336129472,
+          "sha256": "d12dc030b69ef84f26fbc0a69fe3d5da10e7c645b5a075fa08610d55b4a7d90a",
+          "urls": {
+            "huggingface": "https://huggingface.co/WiKiVibe/SanWich-AI-Engine/resolve/main/SanWich_AI_Engine_CUDA12_v3.zip"
+          }
+        },
+        {
+          "name": "SanWich_Update_v3.0.0-beta.7.zip",
+          "role": "update",
+          "size": 459104038,
+          "sha256": "bec209f03c85967e11e5d45460a513e40561de810f2ada832570827c1ceb7c8e",
+          "urls": {
+            "github_release": "https://github.com/WiKiVibe/SanWich/releases/download/v3.0.0-beta.7/SanWich_Update_v3.0.0-beta.7.zip"
+          }
+        },
+        {
+          "name": "SanWich_v3.0.0-beta.7_App_Lightweight.zip",
+          "role": "app",
+          "size": 458908500,
+          "sha256": "7a34b525345902078ef67c500b4c873bd6f4b5fd3200e14e48dfd3aec9c2ef35",
+          "urls": {
+            "huggingface": "https://huggingface.co/WiKiVibe/SanWich-AI-Engine/resolve/main/SanWich_v3.0.0-beta.7_App_Lightweight.zip"
+          }
+        }
+      ],
+      "published_to": {
+        "huggingface": true,
+        "github_release": true
+      }
+    },
+    {
+      "version": "3.0.0-beta.5",
+      "tag": "v3.0.0-beta.5",
+      "date": "2026-10-13",
+      "prerelease": true,
+      "build_id": "20261013-2145",
+      "notes_zh": [
+        "支援 RTX 50 系列顯示卡的字級對齊；顯示卡無法使用時，會自動改用 CPU 完成。",
+        "字幕預設存在影片旁邊，同名自動加 (2)，不會覆蓋舊檔；執行紀錄 30 天自動清除。",
+        "開啟速度更快。",
+        "換電腦時，登入可以直接改綁授權。",
+        "轉寫等待期間提供 16 課快捷鍵教學。",
+        "換成新的「影音轉字幕」浮水印（無陰影）。",
+        "程式附帶的說明改成白話版本。"
+      ],
+      "upgrade_notes_zh": [
+        "AI 運算環境已更新為 v3，需要下載新的 SanWich_AI_Engine_CUDA12_v3.zip（約 3.3 GB）。"
+      ],
+      "known_issues_zh": [],
+      "requires_engine": "SanWich_AI_Engine_CUDA12_v3.zip",
+      "assets": [
+        {
+          "name": "SanWich_v3.0.0-beta.5_App_Lightweight.zip",
+          "role": "app",
+          "size": 458372265,
+          "sha256": "b063fa48687a88ae2a148ef1fa2b67e7844fe4f0dc7c6857bbb230134323851c",
+          "urls": {
+            "huggingface": "https://huggingface.co/WiKiVibe/SanWich-AI-Engine/resolve/main/SanWich_v3.0.0-beta.5_App_Lightweight.zip"
+          }
+        },
+        {
+          "name": "SanWich_AI_Engine_CUDA12_v3.zip",
+          "role": "engine",
+          "size": 3336129472,
+          "sha256": "d12dc030b69ef84f26fbc0a69fe3d5da10e7c645b5a075fa08610d55b4a7d90a",
+          "urls": {
+            "huggingface": "https://huggingface.co/WiKiVibe/SanWich-AI-Engine/resolve/main/SanWich_AI_Engine_CUDA12_v3.zip"
+          }
+        }
+      ],
+      "published_to": {
+        "huggingface": true,
+        "github_release": false,
+        "website": false
+      }
+    }
+  ],
+  "latest": "3.0.0-beta.7"
+}

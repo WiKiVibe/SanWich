@@ -79,7 +79,7 @@ SanWich 為 Windows 原生桌面軟體，處理速度取決於本機硬體配置
 請至 [WiKiVibe 官網](https://wikivibe.win/?app=sanwich) 下載 SanWich。
 
 ### 2. 解壓縮與初次設定
-1. 將 `SanWich_v3.0.0-beta.5_App_Lightweight.zip` 解壓縮到可寫入的資料夾，開啟其中 `SanWich` 資料夾內的 `SanWich.exe`。
+1. 將 `SanWich_v3.0.0-beta.7_App_Lightweight.zip` 解壓縮到可寫入的資料夾，開啟其中 `SanWich` 資料夾內的 `SanWich.exe`。
 2. 首次開啟會顯示教學，並檢查運算環境與所選模型；可依畫面提示在教學期間下載所需檔案。
 3. 若已另外下載運算環境，可在準備畫面按「載入模型包」，選取 `SanWich_AI_Engine_CUDA12_v3.zip`；程式會先校驗檔案完整性再安裝。
 4. 純本機語音辨識（單一來源 5 分鐘內）不需登入；使用 AI 校對時，請在「版本與授權」以電子郵件取得驗證碼並登入（Free 方案無需輸入 KEY）。

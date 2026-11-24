@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "product": "SanWich",
-  "updated": "2026-11-24",
+  "updated": "2026-11-25",
   "releases": [
     {
       "version": "3.0.0-beta.8",
@@ -60,7 +60,8 @@
       ],
       "published_to": {
         "huggingface": true,
-        "github_release": true
+        "github_release": true,
+        "website": true
       }
     },
     {

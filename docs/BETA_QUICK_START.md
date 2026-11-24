@@ -1,19 +1,19 @@
 # SanWich V3 公測快速上手指南
 
-適用版本：`3.0.0-beta.7`（公測候選）。實際下載檔名、開放功能與限制，請以該次發行說明及程式內顯示為準。
+適用版本：`3.0.0-beta.8`（公測候選）。實際下載檔名、開放功能與限制，請以該次發行說明及程式內顯示為準。
 
 ## 準備下載
 
 | 檔案 | 用途 | 下載位置 |
 |---|---|---|
-| `SanWich_v3.0.0-beta.7_App_Lightweight.zip` | SanWich 主程式 | [WiKiVibe 官網](https://wikivibe.win/?app=sanwich) |
+| `SanWich_v3.0.0-beta.8_App_Lightweight.zip` | SanWich 主程式 | [WiKiVibe 官網](https://wikivibe.win/?app=sanwich) |
 | `SanWich_AI_Engine_CUDA12_v3.zip` | AI 運算環境（可由程式下載，也可事先手動下載） | [Hugging Face：SanWich AI Engine](https://huggingface.co/WiKiVibe/SanWich-AI-Engine) |
 
 檔名中的版本號會隨發行版本變動，請下載同一次發行說明所列的檔案。
 
 ## 開始使用
 
-1. 將 `SanWich_v3.0.0-beta.7_App_Lightweight.zip` 解壓縮到可寫入的資料夾，例如使用者的「下載」或「文件」資料夾。
+1. 將 `SanWich_v3.0.0-beta.8_App_Lightweight.zip` 解壓縮到可寫入的資料夾，例如使用者的「下載」或「文件」資料夾。
 2. 開啟解壓後 `SanWich` 資料夾中的 `SanWich.exe`。程式檔案與同資料夾內的附屬檔案必須放在一起；之後移動程式時，請保留整個資料夾，不單獨搬移 EXE。
 3. 首次開啟會顯示教學，並檢查 AI 運算環境與所選模型。可依畫面提示在教學期間下載所需檔案；模型下載到磁碟並通過檢查後才會顯示就緒。下載取消後，已下載的部分會保留，可再次重試。
 4. 若已手動下載 `SanWich_AI_Engine_CUDA12_v3.zip`，可在準備畫面按「載入模型包」並選取該檔案。程式會先校驗檔案完整性再安裝，不符合時會停止。
@@ -53,6 +53,8 @@ SanWich 公測版還沒有購買 Windows 程式碼簽章憑證，所以第一次
 ## 套用後續更新
 
 從 beta.7 起，程式啟動後會自動檢查是否有新版；有新版時會提示，按下「立即更新」才會下載並更新，不會再問第二次，也可選「稍後」或「略過此版」。手動取得的更新檔仍可使用，步驟如下。
+
+**從 beta.7 升級到 beta.8**：程式開啟後會自動提示有新版，按「立即更新」即可；也可以依下方步驟手動套用 `SanWich_Update_v3.0.0-beta.8.zip`。AI 運算環境沿用 v3，不需要重新下載。
 
 **從 beta.5 升級到 beta.7**：beta.5 沒有自動檢查更新，請依下方步驟手動套用 `SanWich_Update_v3.0.0-beta.7.zip`。這次升級仍用舊的更新方式，需要數分鐘，期間請不要重新開啟程式。AI 運算環境沿用 v3，不需要重新下載。
 

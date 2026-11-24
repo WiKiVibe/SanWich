@@ -1,8 +1,68 @@
 {
   "schema": 1,
   "product": "SanWich",
-  "updated": "2026-10-18",
+  "updated": "2026-11-24",
   "releases": [
+    {
+      "version": "3.0.0-beta.8",
+      "tag": "v3.0.0-beta.8",
+      "date": "2026-11-24",
+      "prerelease": true,
+      "build_id": "20261124-0848-d220ee8",
+      "notes_zh": [
+        "新增：AI 校對完成後，處理報告會直接標出改了哪些字",
+        "新增：使用本機 AI 時，會自動再檢查一次沒把握的字",
+        "新增：在程式裡就能訂閱 PLUS 或購買 PRO",
+        "改善：YouTube 可以在播放器上直接選範圍，片段下載更快",
+        "改善：斷句更自然，專有名詞不會被切開，英文字幕更好讀",
+        "改善：AI 校對更認得補充資料裡的人名、店名，台灣口音聽錯的也能改回來",
+        "更新更快：之後的版本只會下載有變動的部分"
+      ],
+      "upgrade_notes_zh": [
+        "從 beta.7 升級：程式開啟後會自動提示有新版，按「立即更新」即可；也可以到「版本與授權」按「套用更新檔」，選擇 SanWich_Update_v3.0.0-beta.8.zip。",
+        "AI 運算環境沿用 v3，不需要重新下載。"
+      ],
+      "known_issues_zh": [
+        "程式尚未購買程式碼簽章憑證，第一次開啟時 Windows 會出現「Windows 已保護您的電腦」，處理方式見快速上手指南。"
+      ],
+      "requires_engine": "SanWich_AI_Engine_CUDA12_v3.zip",
+      "assets": [
+        {
+          "name": "SanWich_AI_Engine_CUDA12_v3.zip",
+          "role": "engine",
+          "size": 3336129472,
+          "sha256": "d12dc030b69ef84f26fbc0a69fe3d5da10e7c645b5a075fa08610d55b4a7d90a",
+          "urls": {
+            "huggingface": "https://huggingface.co/WiKiVibe/SanWich-AI-Engine/resolve/main/SanWich_AI_Engine_CUDA12_v3.zip"
+          }
+        },
+        {
+          "name": "SanWich_Update_v3.0.0-beta.8.zip",
+          "role": "update",
+          "size": 459462472,
+          "sha256": "a1e4f974868bd9e9985c5123470264bef28137740d3dc5ff016ff77193962cc5",
+          "urls": {}
+        },
+        {
+          "name": "SanWich_Update_v3.0.0-beta.8_from_v3.0.0-beta.7.zip",
+          "role": "update",
+          "size": 7276176,
+          "sha256": "ffdcfadf9f53d90bd9f70ebd4953953e1a56293e7ff4324c12e4f80e802fe75c",
+          "urls": {}
+        },
+        {
+          "name": "SanWich_v3.0.0-beta.8_App_Lightweight.zip",
+          "role": "app",
+          "size": 459266934,
+          "sha256": "4c3b6dcea8ab5a8ca392168fe6d30ad97393ac197bbbfd19ce2bd32385ddbb47",
+          "urls": {}
+        }
+      ],
+      "published_to": {
+        "huggingface": true,
+        "github_release": true
+      }
+    },
     {
       "version": "3.0.0-beta.7",
       "tag": "v3.0.0-beta.7",
@@ -70,7 +130,8 @@
       ],
       "published_to": {
         "huggingface": true,
-        "github_release": true
+        "github_release": true,
+        "website": true
       }
     },
     {
@@ -120,5 +181,5 @@
       }
     }
   ],
-  "latest": "3.0.0-beta.7"
+  "latest": "3.0.0-beta.8"
 }
